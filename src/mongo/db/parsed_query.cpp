@@ -113,6 +113,7 @@ namespace mongo {
         _returnKey = false;
         _showDiskLoc = false;
         _maxScan = 0;
+        _limit = 0;
     }
 
     /* This is for languages whose "objects" are not well ordered (JSON is well ordered).
@@ -174,6 +175,8 @@ namespace mongo {
                     _returnKey = e.trueValue();
                 else if ( strcmp( "maxScan" , name ) == 0 )
                     _maxScan = e.numberInt();
+                else if ( strcmp( "limit" , name ) == 0 )
+                    _limit = e.numberInt();
                 else if ( strcmp( "showDiskLoc" , name ) == 0 )
                     _showDiskLoc = e.trueValue();
                 else if ( strcmp( "comment" , name ) == 0 ) {

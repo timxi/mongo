@@ -65,6 +65,7 @@ namespace mongo {
         const BSONObj& getOrder() const { return _order; }
         const BSONObj& getHint() const { return _hint; }
         int getMaxScan() const { return _maxScan; }
+        int getLimit() const { return _limit; }
         
         bool couldBeCommand() const;
         
@@ -109,6 +110,7 @@ namespace mongo {
         BSONObj _max;
         BSONObj _hint;
         int _maxScan;
+        int _limit;
     };
 
 } // namespace mongo

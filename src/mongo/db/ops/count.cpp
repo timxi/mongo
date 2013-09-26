@@ -23,6 +23,7 @@
 #include "mongo/db/namespace_details.h"
 #include "mongo/db/queryutil.h"
 #include "mongo/db/query_optimizer.h"
+#include "mongo/db/parsed_query.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/util/elapsed_tracker.h"
 
@@ -35,13 +36,7 @@ namespace mongo {
             err = "ns missing";
             return -1;
         }
-        BSONObj query = cmd.getObjectField("query");
-
-        // count of all objects
-        if ( query.isEmpty() ) {
-            // TODO: TokuMX: call this with in-memory stats once we maintain them
-            //return applySkipLimit( d->stats.nrecords , cmd );
-        }
+        BSONObj queryObj = cmd.getObjectField("query");
 
         long long count = 0;
         long long skip = cmd["skip"].numberLong();
@@ -50,6 +45,10 @@ namespace mongo {
         if ( limit < 0 ) {
             limit  = -limit;
         }
+
+        shared_ptr<ParsedQuery> pq(new ParsedQuery(ns, skip, limit, 0, queryObj, BSONObj()));
+        const BSONObj &query = pq->getFilter();
+        const BSONObj &order = pq->getOrder();
 
         OpSettings settings;
         settings.setBulkFetch(true);
@@ -60,11 +59,12 @@ namespace mongo {
         Client::Transaction transaction(DB_TXN_SNAPSHOT | DB_TXN_READ_ONLY);
         try {
             shared_ptr<Cursor> cursor =
-                    getOptimizedCursor( ns, query, BSONObj(), QueryPlanSelectionPolicy::any(),
+                    getOptimizedCursor( ns, query, order, QueryPlanSelectionPolicy::any(),
                                         // Avoid using a Matcher when a Cursor can
                                         // exactly match the query using a
                                         // FieldRangeVector.  See SERVER-1752.
-                                        false /* requestMatcher */ );
+                                        false /* requestMatcher */,
+                                        pq);
             for ( ; cursor->ok() ; cursor->advance() ) {
                 if ( cursor->currentMatches() && !cursor->getsetdup( cursor->currPK() ) ) {
                     if ( skip > 0 ) {

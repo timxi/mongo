@@ -23,6 +23,7 @@
 #include "mongo/db/oplog.h"
 #include "mongo/db/queryutil.h"
 #include "mongo/db/query_optimizer.h"
+#include "mongo/db/parsed_query.h"
 #include "mongo/db/namespace_details.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/ops/delete.h"
@@ -180,9 +181,8 @@ namespace mongo {
         return UpdateResult( 1 , 0 , 1 , BSONObj() );
     }
 
-    UpdateResult _updateObjects( const char* ns,
+    UpdateResult _updateObjects( const shared_ptr<const ParsedQuery> &pq,
                                  const BSONObj& updateobj,
-                                 const BSONObj& patternOrig,
                                  bool upsert,
                                  bool multi,
                                  bool logop ,
@@ -190,10 +190,19 @@ namespace mongo {
                                  bool fromMigrate,
                                  const QueryPlanSelectionPolicy& planPolicy ) {
 
+        const char *ns = pq->ns();
+        const BSONObj &order = pq->getOrder();
+        const BSONObj &query = pq->getFilter();
+        const int limit = pq->getLimit();
+
         TOKULOG(2) << "update: " << ns
                    << " update: " << updateobj
-                   << " query: " << patternOrig
-                   << " upsert: " << upsert << " multi: " << multi << endl;
+                   << " query: " << query
+                   << " order: " << order
+                   << " upsert: " << upsert
+                   << " multi: " << multi
+                   << " limit: " << limit
+                   << endl;
 
         debug.updateobj = updateobj;
 
@@ -215,21 +224,19 @@ namespace mongo {
             modsAreIndexed = mods->isIndexed();
         }
 
-
         int idIdxNo = -1;
         if ( planPolicy.permitOptimalIdPlan() && !multi && !modsAreIndexed &&
-             (idIdxNo = d->findIdIndex()) >= 0 && mayUpdateById(d, patternOrig) ) {
+             (idIdxNo = d->findIdIndex()) >= 0 && mayUpdateById(d, query) ) {
             debug.idhack = true;
             IndexDetails &idx = d->idx(idIdxNo);
-            BSONObj pk = idx.getKeyFromQuery(patternOrig);
-            TOKULOG(3) << "_updateObjects using simple _id query, pattern " << patternOrig << ", pk " << pk << endl;
+            BSONObj pk = idx.getKeyFromQuery(query);
             UpdateResult result = _updateById( pk,
                                                isOperatorUpdate,
                                                mods.get(),
                                                d,
                                                ns,
                                                updateobj,
-                                               patternOrig,
+                                               query,
                                                logop,
                                                debug,
                                                fromMigrate);
@@ -246,7 +253,8 @@ namespace mongo {
 
         int numModded = 0;
         debug.nscanned = 0;
-        shared_ptr<Cursor> c = getOptimizedCursor( ns, patternOrig, BSONObj(), planPolicy );
+        shared_ptr<Cursor> c = getOptimizedCursor( ns, query, order,
+                                                   planPolicy, true, pq);
 
         if( c->ok() ) {
             set<BSONObj> seenObjects;
@@ -276,7 +284,7 @@ namespace mongo {
                 }
 
                 BSONObj currentObj = c->current();
-                BSONObj pattern = patternOrig;
+                BSONObj pattern = query;
 
                 if ( logop ) {
                     BSONObjBuilder idPattern;
@@ -339,7 +347,7 @@ namespace mongo {
                     updateUsingMods( d, currPK, currentObj, *mss, &loud );
 
                     numModded++;
-                    if ( ! multi )
+                    if ( ! multi || numModded >= limit )
                         return UpdateResult( 1 , 1 , numModded , BSONObj() );
 
                     continue;
@@ -360,7 +368,7 @@ namespace mongo {
             BSONObj newObj = updateobj;
             if ( updateobj.firstElementFieldName()[0] == '$' ) {
                 // upsert of an $operation. build a default object
-                BSONObj newObj = mods->createNewFromQuery( patternOrig );
+                BSONObj newObj = mods->createNewFromQuery( query );
                 debug.fastmodinsert = true;
                 insertAndLog( ns, d, newObj, logop, fromMigrate );
                 return UpdateResult( 0 , 1 , 1 , newObj );
@@ -374,14 +382,14 @@ namespace mongo {
         return UpdateResult( 0 , isOperatorUpdate , 0 , BSONObj() );
     }
 
-    void validateUpdate( const char* ns , const BSONObj& updateobj, const BSONObj& patternOrig ) {
+    void validateUpdate( const char* ns , const BSONObj& updateobj, const BSONObj &query ) {
         uassert( 10155 , "cannot update reserved $ collection", strchr(ns, '$') == 0 );
         if ( strstr(ns, ".system.") ) {
             /* dm: it's very important that system.indexes is never updated as IndexDetails
                has pointers into it */
             uassert( 10156,
                      str::stream() << "cannot update system collection: "
-                                   << ns << " q: " << patternOrig << " u: " << updateobj,
+                                   << ns << " q: " << query << " u: " << updateobj,
                      legalClientSystemNS( ns , true ) );
         }
     }
@@ -396,10 +404,12 @@ namespace mongo {
                                 bool fromMigrate,
                                 const QueryPlanSelectionPolicy& planPolicy ) {
 
-        validateUpdate( ns , updateobj , patternOrig );
+        // The optimizer API requires a shared pointer to a parsed query.
+        // So we have to needlessly malloc one into a shared pointer here.
+        shared_ptr<ParsedQuery> pq(new ParsedQuery(ns, 0, 0, 0, patternOrig, BSONObj()));
+        validateUpdate( ns , updateobj , pq->getFilter() );
 
-        UpdateResult ur = _updateObjects(ns, updateobj, patternOrig,
-                                         upsert, multi, logop,
+        UpdateResult ur = _updateObjects(pq, updateobj, upsert, multi, logop,
                                          debug, fromMigrate, planPolicy );
         debug.nupdated = ur.num;
         return ur;

@@ -24,6 +24,7 @@
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/namespace_details.h"
 #include "mongo/db/query_optimizer.h"
+#include "mongo/db/parsed_query.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/util/stacktrace.h"
 #include "mongo/db/oplog_helpers.h"
@@ -36,13 +37,20 @@ namespace mongo {
     }
     
     long long _deleteObjects(const char *ns, BSONObj pattern, bool justOne, bool logop) {
+        shared_ptr<ParsedQuery> pq(new ParsedQuery(ns, 0, 0, 0, pattern, BSONObj()));
+
+        const BSONObj &query = pq->getFilter();
+        const BSONObj &order = pq->getHint();
+        const int limit = pq->getLimit();
+
         NamespaceDetails *d = nsdetails( ns );
         if ( ! d )
             return 0;
 
         uassert( 10101 ,  "can't remove from a capped collection" , ! d->isCapped() );
 
-        shared_ptr< Cursor > c = getOptimizedCursor( ns, pattern );
+        shared_ptr< Cursor > c = getOptimizedCursor( ns, query, order,
+                                                     QueryPlanSelectionPolicy::any(), true, pq );
         if ( !c->ok() ) {
             return 0;
         }
@@ -80,7 +88,7 @@ namespace mongo {
             deleteOneObject(d, pk, obj);
             nDeleted++;
 
-            if ( justOne ) {
+            if ( justOne || nDeleted >= limit ) {
                 break;
             }
         }

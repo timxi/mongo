@@ -26,6 +26,7 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/cursor.h"
 #include "mongo/db/keygenerator.h"
+#include "mongo/db/namespacestring.h"
 #include "mongo/db/queryutil.h"
 #include "mongo/db/repl/rs.h"
 #include "mongo/db/ops/delete.h"
@@ -257,7 +258,7 @@ namespace mongo {
 
         // Removing this index's ns from the system.indexes/namespaces catalog.
         removeNamespaceFromCatalog(ns);
-        if (!StringData(parentns).endsWith(".system.indexes")) {
+        if (nsToCollectionSubstring(parentns) != "system.indexes") {
             removeFromSysIndexes(parentns, indexName());
         }
     }
@@ -500,9 +501,9 @@ namespace mongo {
     void IndexDetails::Builder::insertPair(const BSONObj &key, const BSONObj *pk, const BSONObj &val) {
         storage::Key skey(key, pk);
         DBT kdbt = skey.dbt();
-        DBT vdbt = storage::make_dbt(NULL, 0);
+        DBT vdbt = storage::dbt_make(NULL, 0);
         if (_idx.clustering()) {
-            vdbt = storage::make_dbt(val.objdata(), val.objsize());
+            vdbt = storage::dbt_make(val.objdata(), val.objsize());
         }
         const int r = _loader.put(&kdbt, &vdbt);
         if (r != 0) {

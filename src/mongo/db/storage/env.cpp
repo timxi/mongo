@@ -37,6 +37,7 @@
 #include "mongo/db/cmdline.h"
 #include "mongo/db/descriptor.h"
 #include "mongo/db/storage/assert_ids.h"
+#include "mongo/db/storage/dbt.h"
 #include "mongo/db/storage/exception.h"
 #include "mongo/db/storage/key.h"
 #include "mongo/util/assert_util.h"
@@ -73,36 +74,6 @@ namespace mongo {
                 }
                 fassertFailed(16455);
             }
-        }
-
-        static void dbt_realloc(DBT *dbt, const void *data, const size_t size) {
-            if (dbt->flags != DB_DBT_REALLOC || dbt->ulen < size) {
-                dbt->ulen = size;
-                dbt->data = realloc(dbt->flags == DB_DBT_REALLOC ? dbt->data : NULL, dbt->ulen);
-                dbt->flags = DB_DBT_REALLOC;
-                // Calling realloc() with a size of 0 may return NULL on some platforms
-                verify(dbt->ulen == 0 || dbt->data != NULL);
-            }
-            dbt->size = size;
-            memcpy(dbt->data, data, size);
-        }
-
-        static void dbt_array_clear_and_resize(DBT_ARRAY *dbt_array,
-                                               const size_t new_capacity) {
-            const size_t old_capacity = dbt_array->capacity;
-            if (old_capacity < new_capacity) {
-                dbt_array->capacity = new_capacity;
-                dbt_array->dbts = static_cast<DBT *>(
-                                  realloc(dbt_array->dbts, new_capacity * sizeof(DBT)));
-                memset(&dbt_array->dbts[old_capacity], 0, (new_capacity - old_capacity) * sizeof(DBT));
-            }
-            dbt_array->size = 0;
-        }
-
-        static void dbt_array_push(DBT_ARRAY *dbt_array, const void *data, const size_t size) {
-            verify(dbt_array->size < dbt_array->capacity);
-            dbt_realloc(&dbt_array->dbts[dbt_array->size], data, size);
-            dbt_array->size++;
         }
 
         static int generate_keys(DB *dest_db, DB *src_db,
@@ -247,6 +218,11 @@ namespace mongo {
             }
             TOKULOG(1) << "lock timeout set to " << lock_timeout << " milliseconds." << endl;
 
+            const uint64_t loader_memory = cmdLine.loaderMaxMemory > 0 ?
+                                           (uint64_t) cmdLine.loaderMaxMemory : 100 * 1024 * 1024;
+            env->set_loader_memory_size(env, loader_memory);
+            TOKULOG(1) << "loader memory size set to " << loader_memory << " bytes." << endl;
+
             r = env->set_default_bt_compare(env, dbt_key_compare);
             if (r != 0) {
                 handle_ydb_error_fatal(r);
@@ -292,6 +268,12 @@ namespace mongo {
                     handle_ydb_error_fatal(r);
                 }
                 TOKULOG(1) << "temporary bulk loader directory set to " << tmpDir << endl;
+            }
+
+            if (cmdLine.debug) {
+                // The default number of bucket mutexes is 1 million, which is a nightmare for
+                // valgrind's drd tool to keep track of.
+                db_env_set_num_bucket_mutexes(32);
             }
 
             const int env_flags = DB_INIT_LOCK|DB_INIT_MPOOL|DB_INIT_TXN|DB_CREATE|DB_PRIVATE|DB_INIT_LOG|DB_RECOVER;
@@ -440,7 +422,7 @@ namespace mongo {
             const DBT *desc = (db != NULL && db->cmp_descriptor != NULL)
                               ? &db->cmp_descriptor->dbt
                               : NULL;
-            if (desc != NULL && desc->data != NULL) {
+            if (desc != NULL && desc->data != NULL && desc->size > 0) {
                 Descriptor descriptor(reinterpret_cast<const char *>(desc->data), desc->size);
                 const BSONObj key = sKey.key();
 
@@ -646,6 +628,21 @@ namespace mongo {
                 handle_ydb_error(r);
             }
             TOKULOG(1) << "cleaner iterations set to " << num_iterations << "." << endl;
+        }
+
+        void set_lock_timeout(uint64_t timeout_ms) {
+            cmdLine.lockTimeout = timeout_ms;
+            int r = env->set_lock_timeout(env, timeout_ms);
+            if (r != 0) {
+                handle_ydb_error_fatal(r);
+            }
+            TOKULOG(1) << "lock timeout set to " << timeout_ms << " milliseconds." << endl;
+        }
+
+        void set_loader_max_memory(uint64_t bytes) {
+            cmdLine.loaderMaxMemory = bytes;
+            env->set_loader_memory_size(env, bytes);
+            TOKULOG(1) << "loader max memory set to " << bytes << "." << endl;
         }
 
         void handle_ydb_error(int error) {

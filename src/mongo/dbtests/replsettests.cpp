@@ -42,15 +42,14 @@ namespace ReplSetTests {
     public:
         static const int replWriterThreadCount;
         static const int replPrefetcherThreadCount;
+        static ReplSetTest* make() {
+            auto_ptr<ReplSetTest> ret(new ReplSetTest());
+            ret->init();
+            return ret.release();
+        }
         virtual ~ReplSetTest() {
             delete _myConfig;
             delete _config;
-        }
-        ReplSetTest() /*: SyncTail(0)*/ {
-            BSONArrayBuilder members;
-            members.append(BSON("_id" << 0 << "host" << "host1"));
-            _config = new ReplSetConfig(BSON("_id" << "foo" << "members" << members.arr()));
-            _myConfig = new ReplSetConfig::MemberCfg();
         }
         virtual bool isSecondary() {
             return true;
@@ -75,6 +74,16 @@ namespace ReplSetTests {
             _syncTail = syncTail;
         }
         */
+    private:
+        ReplSetTest()
+            {
+        }
+        void init() {
+            BSONArrayBuilder members;
+            members.append(BSON("_id" << 0 << "host" << "host1"));
+            _config = ReplSetConfig::make(BSON("_id" << "foo" << "members" << members.arr()));
+            _myConfig = new ReplSetConfig::MemberCfg();
+        }
     };
 
     /*
@@ -157,8 +166,8 @@ namespace ReplSetTests {
             //_tailer = new SyncTail(_bgsync);
 
             // setup theReplSet
-            ReplSetTest *rst = new ReplSetTest();
-            //t->setSyncTail(_bgsync);
+            ReplSetTest *rst = ReplSetTest::make();
+            //rst->setSyncTail(_bgsync);
             delete theReplSet;
             theReplSet = rst;
         }

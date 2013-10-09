@@ -20,6 +20,7 @@
 #include "repl_block.h"
 #include "stats/counters.h"
 #include "mongo/db/namespace_details.h"
+#include "mongo/db/namespacestring.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/ops/insert.h"
@@ -197,6 +198,67 @@ namespace OpLogHelpers{
         }
     }
 
+    static void runColdIndexFromOplog(
+        const char* ns,
+        BSONObj row
+        )
+    {
+        Client::WriteContext ctx(ns);
+        NamespaceDetails* nsd = nsdetails(ns);
+        const string &coll = row["ns"].String();
+
+        NamespaceDetails* collNsd = nsdetails(coll);
+        const bool ok = collNsd->ensureIndex(row);
+        if (!ok) {
+            // the index already exists, so this is a no-op
+            // Note that for create index and drop index, we
+            // are tolerant of the fact that the operation may
+            // have already been done
+            return;
+        }
+        insertOneObject(nsd, row, NamespaceDetails::NO_UNIQUE_CHECKS);
+    }
+    static void runHotIndexFromOplog(
+        const char* ns,
+        BSONObj row
+        )
+    {
+        // The context and lock must outlive the indexer so that
+        // the indexer destructor gets called in a write locked.
+        // These MUST NOT be reordered, the context must destruct
+        // after the indexer.
+        scoped_ptr<Lock::DBWrite> lk(new Lock::DBWrite(ns));
+        scoped_ptr<NamespaceDetails::HotIndexer> indexer;
+
+        {
+            Client::Context ctx(ns);
+            NamespaceDetails* nsd = nsdetails(ns);
+
+            const string &coll = row["ns"].String();
+            NamespaceDetails* collNsd = nsdetails(coll);
+            if (collNsd->findIndexByKeyPattern(row["key"].Obj()) >= 0) {
+                // the index already exists, so this is a no-op
+                // Note that for create index and drop index, we
+                // are tolerant of the fact that the operation may
+                // have already been done
+                return;
+            }
+            insertOneObject(nsd, row, NamespaceDetails::NO_UNIQUE_CHECKS);
+            indexer.reset(new NamespaceDetails::HotIndexer(collNsd, row));
+            indexer->prepare();
+        }
+
+        {
+            Lock::DBWrite::Downgrade dg(lk);
+            Client::Context ctx(ns);
+            indexer->build();
+        }
+
+        {
+            Client::Context ctx(ns);
+            indexer->commit();
+        }
+    }
     static void runNonSystemInsertFromOplogWithLock(
         const char* ns, 
         BSONObj row
@@ -210,24 +272,14 @@ namespace OpLogHelpers{
     static void runInsertFromOplog(const char* ns, BSONObj op) {
         BSONObj row = op[KEY_STR_ROW].Obj();
         // handle add index case
-        if (mongoutils::str::endsWith(ns, ".system.indexes")) {
+        if (nsToCollectionSubstring(ns) == "system.indexes") {
             // do not build the index if the user has disabled
             if (theReplSet->buildIndexes()) {
-                Client::WriteContext ctx(ns);
-                NamespaceDetails* nsd = nsdetails(ns);
-                const string &coll = row["ns"].String();
-
-                NamespaceDetails* collNsd = nsdetails(coll);
-                const bool ok = collNsd->ensureIndex(row);
-                if (!ok) {
-                    // the index already exists, so this is a no-op
-                    // Note that for create index and drop index, we
-                    // are tolerant of the fact that the operation may
-                    // have already been done
-                    return;
+                if (row["background"].trueValue()) {
+                    runHotIndexFromOplog(ns, row);
+                } else {
+                    runColdIndexFromOplog(ns, row);
                 }
-                // overwrite set to true because we are running on a secondary
-                insertOneObject(nsd, row, NamespaceDetails::NO_UNIQUE_CHECKS);
             }
         }
         else {
@@ -328,11 +380,11 @@ namespace OpLogHelpers{
         if (isRollback) {
             // if this is a rollback, then the newRow is what is in the
             // collections, that we want to replace with oldRow
-            updateOneObject(nsd, pk, newRow, oldRow, NULL, flags);
+            updateOneObject(nsd, pk, newRow, oldRow, LogOpUpdateDetails(), flags);
         }
         else {
             // normal replication case
-            updateOneObject(nsd, pk, oldRow, newRow, NULL, flags);
+            updateOneObject(nsd, pk, oldRow, newRow, LogOpUpdateDetails(), flags);
         }
     }
     static void runUpdateFromOplog(const char* ns, BSONObj op, bool isRollback) {
@@ -406,7 +458,7 @@ namespace OpLogHelpers{
 
     static void runRollbackInsertFromOplog(const char* ns, BSONObj op) {
         // handle add index case
-        if (mongoutils::str::endsWith(ns, ".system.indexes")) {
+        if (nsToCollectionSubstring(ns) == "system.indexes") {
             throw RollbackOplogException(str::stream() << "Not rolling back an add index on " << ns << ". Op: " << op.toString(false, true));
         }
         else {

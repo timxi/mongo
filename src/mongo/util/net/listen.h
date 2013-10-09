@@ -18,6 +18,7 @@
 #pragma once
 
 #include "sock.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/util/concurrency/ticketholder.h"
 
 namespace mongo {
@@ -34,16 +35,6 @@ namespace mongo {
 
         virtual ~Listener();
         
-#ifdef MONGO_SSL
-        /**
-         * make this an ssl socket
-         * ownership of SSLManager remains with the caller
-         */
-        void secure( SSLManager* manager );
-
-        void addSecurePort( SSLManager* manager , int additionalPort );
-#endif
-
         void initAndListen(); // never returns unless error (start a thread)
 
         /* spawn a thread, etc., then return */
@@ -81,7 +72,6 @@ namespace mongo {
         
 #ifdef MONGO_SSL
         SSLManager* _ssl;
-        int _sslPort;
 #endif
         
         /**
@@ -94,6 +84,16 @@ namespace mongo {
         static const Listener* _timeTracker;
         
         virtual bool useUnixSockets() const { return false; }
+
+    public:
+        /** the "next" connection number.  every connection to this process has a unique number */
+        static AtomicInt64 globalConnectionNumber;
+
+        /** keeps track of how many allowed connections there are and how many are being used*/
+        static TicketHolder globalTicketHolder;
+
+        /** makes sure user input is sane */
+        static void checkTicketNumbers();
     };
 
     class ListeningSockets {
@@ -146,8 +146,5 @@ namespace mongo {
         set<string>* _socketPaths; // for unix domain sockets
         static ListeningSockets* _instance;
     };
-
-
-    extern TicketHolder connTicketHolder;
 
 }

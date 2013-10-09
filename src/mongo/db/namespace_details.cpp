@@ -25,6 +25,10 @@
 
 #include <boost/filesystem/operations.hpp>
 
+#include "mongo/base/init.h"
+#include "mongo/base/units.h"
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/cursor.h"
 #include "mongo/db/database.h"
 #include "mongo/db/databaseholder.h"
@@ -38,6 +42,7 @@
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/ops/update.h"
+#include "mongo/db/storage/dbt.h"
 #include "mongo/db/storage/env.h"
 #include "mongo/db/storage/txn.h"
 #include "mongo/db/storage/key.h"
@@ -294,6 +299,68 @@ namespace mongo {
         }
     };
 
+    namespace {
+        BSONObj oldSystemUsersKeyPattern;
+        BSONObj extendedSystemUsersKeyPattern;
+        std::string extendedSystemUsersIndexName;
+
+        MONGO_INITIALIZER(AuthIndexKeyPatterns)(InitializerContext*) {
+            oldSystemUsersKeyPattern = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << 1);
+            extendedSystemUsersKeyPattern = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << 1 <<
+                                                 AuthorizationManager::USER_SOURCE_FIELD_NAME << 1);
+            extendedSystemUsersIndexName = std::string(str::stream() <<
+                                                       AuthorizationManager::USER_NAME_FIELD_NAME <<
+                                                       "_1_" <<
+                                                       AuthorizationManager::USER_SOURCE_FIELD_NAME <<
+                                                       "_1");
+            return Status::OK();
+        }
+    }
+
+    static void addIndexToCatalog(const BSONObj &info) {
+        const StringData &indexns = info["ns"].Stringdata();
+        if (nsToCollectionSubstring(indexns).startsWith("system.indexes")) {
+            // system.indexes holds all the others, so it is not explicitly listed in the catalog.
+            return;
+        }
+
+        string ns = getSisterNS(indexns, "system.indexes");
+        NamespaceDetails *d = nsdetails_maybe_create(ns);
+        BSONObj objMod = info;
+        insertOneObject(d, objMod);
+    }
+
+    class SystemUsersCollection : public IndexedCollection {
+        static BSONObj extendedSystemUsersIndexInfo(const StringData &ns) {
+            BSONObjBuilder indexBuilder;
+            indexBuilder.append("key", extendedSystemUsersKeyPattern);
+            indexBuilder.appendBool("unique", true);
+            indexBuilder.append("ns", ns);
+            indexBuilder.append("name", extendedSystemUsersIndexName);
+            return indexBuilder.obj();
+        }
+    public:
+        SystemUsersCollection(const StringData &ns, const BSONObj &options) :
+            IndexedCollection(ns, options) {
+            BSONObj info = extendedSystemUsersIndexInfo(ns);
+            createIndex(info);
+        }
+        SystemUsersCollection(const BSONObj &serialized) :
+            IndexedCollection(serialized) {
+            int idx = findIndexByKeyPattern(extendedSystemUsersKeyPattern);
+            if (idx < 0) {
+                const StringData ns = serialized["ns"].Stringdata();
+                BSONObj info = extendedSystemUsersIndexInfo(ns);
+                createIndex(info);
+                addIndexToCatalog(info);
+            }
+            idx = findIndexByKeyPattern(oldSystemUsersKeyPattern);
+            if (idx >= 0) {
+                dropIndex(idx);
+            }
+        }
+    };
+
     // Capped collections have natural order insert semantics but borrow (ie: copy)
     // its document modification strategy from IndexedCollections. The size
     // and count of a capped collection is maintained in memory and kept valid
@@ -313,8 +380,8 @@ namespace mongo {
         CappedCollection(const StringData &ns, const BSONObj &options,
                          const bool mayIndexId = true) :
             NaturalOrderCollection(ns, options),
-            _maxSize(options["size"].numberLong()),
-            _maxObjects(options["max"].numberLong()),
+            _maxSize(BytesQuantity<long long>(options["size"])),
+            _maxObjects(BytesQuantity<long long>(options["max"])),
             _currentObjects(0),
             _currentSize(0),
             _mutex("cappedMutex"),
@@ -700,31 +767,33 @@ namespace mongo {
         }
 
         void close(const bool abortingLoad) {
-            try {
-                if (!abortingLoad) {
-                    const int r = _loader->close();
-                    if (r != 0) {
-                        storage::handle_ydb_error(r);
+            class FinallyClose : boost::noncopyable {
+            public:
+                FinallyClose(BulkLoadedCollection &coll) : c(coll) {}
+                ~FinallyClose() {
+                    c._close();
+                }
+            private:
+                BulkLoadedCollection &c;
+            } finallyClose(*this);
+
+            if (!abortingLoad) {
+                const int r = _loader->close();
+                if (r != 0) {
+                    storage::handle_ydb_error(r);
+                }
+                verify(!_indexBuildInProgress);
+                for (int i = 0; i < _nIndexes; i++) {
+                    IndexDetails &idx = *_indexes[i];
+                    // The PK's uniqueness is verified on loader close, so we should not check it again.
+                    if (!isPKIndex(idx) && idx.unique()) {
+                        checkIndexUniqueness(idx);
                     }
-                    verify(!_indexBuildInProgress);
-                    for (int i = 0; i < _nIndexes; i++) {
-                        IndexDetails &idx = *_indexes[i];
-                        // The PK's uniqueness is verified on loader close, so we should not check it again.
-                        if (!isPKIndex(idx) && idx.unique()) {
-                            checkIndexUniqueness(idx);
-                        }
-                        if (_multiKeyTrackers[i]->isMultiKey()) {
-                            setIndexIsMultikey(i);
-                        }
+                    if (_multiKeyTrackers[i]->isMultiKey()) {
+                        setIndexIsMultikey(i);
                     }
                 }
-            } catch (...) {
-                _loader.reset();
-                NamespaceDetails::close();
-                throw;
             }
-            _loader.reset();
-            NamespaceDetails::close();
         }
 
         virtual void validateConnectionId(const ConnectionId &id) {
@@ -739,8 +808,8 @@ namespace mongo {
             BSONObj pk = obj["_id"].wrap("");
 
             storage::Key sPK(pk, NULL);
-            DBT key = storage::make_dbt(sPK.buf(), sPK.size());
-            DBT val = storage::make_dbt(obj.objdata(), obj.objsize());
+            DBT key = storage::dbt_make(sPK.buf(), sPK.size());
+            DBT val = storage::dbt_make(obj.objdata(), obj.objsize());
             _loader->put(&key, &val);
         }
 
@@ -765,6 +834,15 @@ namespace mongo {
         }
 
     private:
+        // When closing a BulkLoadedCollection, we need to make sure the key trackers and
+        // loaders are destructed before we call up to the parent destructor, because they
+        // reference storage::Dictionaries that get destroyed in the parent destructor.
+        void _close() {
+            _loader.reset();
+            _multiKeyTrackers.reset();
+            NamespaceDetails::close();
+        }
+
         void createIndex(const BSONObj &info) {
             uasserted( 16867, "Cannot create an index on a collection under-going bulk load." );
         }
@@ -813,13 +891,19 @@ namespace mongo {
     }
 
     static bool isSystemCatalog(const StringData &ns) {
-        return ns.find(".system.indexes") != string::npos || ns.find(".system.namespaces") != string::npos;
+        StringData coll = nsToCollectionSubstring(ns);
+        return coll == "system.indexes" || coll == "system.namespaces";
     }
     static bool isProfileCollection(const StringData &ns) {
-        return ns.find(".system.profile") != string::npos;
+        StringData coll = nsToCollectionSubstring(ns);
+        return coll == "system.profile";
     }
     static bool isOplogCollection(const StringData &ns) {
         return ns == rsoplog;
+    }
+    static bool isSystemUsersCollection(const StringData &ns) {
+        StringData coll = nsToCollectionSubstring(ns);
+        return coll == "system.users";
     }
 
     // Construct a brand new NamespaceDetails with a certain primary key and set of options.
@@ -832,7 +916,7 @@ namespace mongo {
         _multiKeyIndexBits(0),
         _qcWriteCount(0) {
 
-        massert( 10356 ,  str::stream() << "invalid ns: " << ns , NamespaceString::validCollectionName(ns.rawData()));
+        massert( 10356 ,  str::stream() << "invalid ns: " << ns , NamespaceString::validCollectionName(ns));
 
         TOKULOG(1) << "Creating NamespaceDetails " << ns << endl;
 
@@ -857,6 +941,9 @@ namespace mongo {
             return shared_ptr<NamespaceDetails>(new OplogCollection(ns, options));
         } else if (isSystemCatalog(ns)) {
             return shared_ptr<NamespaceDetails>(new SystemCatalogCollection(ns, options));
+        } else if (isSystemUsersCollection(ns)) {
+            Client::CreatingSystemUsersScope scope;
+            return shared_ptr<NamespaceDetails>(new SystemUsersCollection(ns, options));
         } else if (isProfileCollection(ns)) {
             // TokuMX doesn't _necessarily_ need the profile to be capped, but vanilla does.
             // We enforce the restriction because it's easier to implement. See SERVER-6937.
@@ -897,6 +984,9 @@ namespace mongo {
         } else if (isSystemCatalog(ns)) {
             massert( 16869, "bug: Should not bulk load a system catalog collection", !bulkLoad );
             return shared_ptr<NamespaceDetails>(new SystemCatalogCollection(serialized));
+        } else if (isSystemUsersCollection(ns)) {
+            massert( 17002, "bug: Should not bulk load the users collection", !bulkLoad );
+            return shared_ptr<NamespaceDetails>(new SystemUsersCollection(serialized));
         } else if (isProfileCollection(ns)) {
             massert( 16870, "bug: Should not bulk load the profile collection", !bulkLoad );
             return shared_ptr<NamespaceDetails>(new ProfileCollection(serialized));
@@ -932,10 +1022,10 @@ namespace mongo {
                     "multiKeyIndexBits" << static_cast<long long>(multiKeyIndexBits) <<
                     "indexes" << indexes_array);
     }
-    BSONObj NamespaceDetails::serialize() const {
+    BSONObj NamespaceDetails::serialize(const bool includeHotIndex) const {
         BSONArrayBuilder indexes_array;
         // Serialize all indexes that exist, including a hot index if it exists.
-        for (int i = 0; i < nIndexesBeingBuilt(); i++) {
+        for (int i = 0; i < (includeHotIndex ? nIndexesBeingBuilt() : nIndexes()); i++) {
             IndexDetails &idx = *_indexes[i];
             indexes_array.append(idx.info());
         }
@@ -1018,7 +1108,9 @@ namespace mongo {
 
         BSONObj obj;
         struct findByPKCallbackExtra extra(obj);
-        const int r = db->getf_set(db, cc().txn().db_txn(), 0, &key_dbt,
+        const int flags = cc().opSettings().getQueryCursorMode() != DEFAULT_LOCK_CURSOR ?
+                          DB_SERIALIZABLE | DB_RMW : 0;
+        const int r = db->getf_set(db, cc().txn().db_txn(), flags, &key_dbt,
                                    findByPKCallback, &extra);
         if (extra.ex != NULL) {
             throw *extra.ex;
@@ -1034,55 +1126,23 @@ namespace mongo {
         return false;
     }
 
-    // Manages an array of DBT_ARRAYs and the lifetime of the objects they store.
-    //
-    // It may be a good idea to cache two of these in the client object so
-    // they're not created/destroyed every time a connection/transaction
-    // does a single write. (multi inserts/updates/deletes come to mind)
-    class DBTArrays : boost::noncopyable {
-    public:
-        DBTArrays(const size_t n) :
-            _arrays(new DBT_ARRAY[n]),
-            _n(n) {
-            memset(_arrays.get(), 0, n * sizeof(DBT_ARRAY));
-        }
-        ~DBTArrays() {
-            for (size_t i = 0; i < _n; i++) {
-                DBT_ARRAY *dbt_array = &_arrays[i];
-                for (size_t j = 0; j < dbt_array->capacity; j++) {
-                    DBT *dbt = &dbt_array->dbts[j];
-                    if (dbt->data != NULL && dbt->flags == DB_DBT_REALLOC) {
-                        free(dbt->data);
-                        dbt->data = NULL;
-                    }
-                }
-                if (dbt_array->dbts != NULL) {
-                    free(dbt_array->dbts);
-                    dbt_array->dbts = NULL;
-                }
-            }
-        }
-        DBT_ARRAY *arrays() const {
-            return _arrays.get();
-        }
-    private:
-        scoped_array<DBT_ARRAY> _arrays;
-        const size_t _n;
-    };
-
     void NamespaceDetails::insertIntoIndexes(const BSONObj &pk, const BSONObj &obj, uint64_t flags) {
         dassert(!pk.isEmpty());
         dassert(!obj.isEmpty());
 
+        if (isSystemUsersCollection(_ns)) {
+            uassertStatusOK(AuthorizationManager::checkValidPrivilegeDocument(nsToDatabaseSubstring(_ns), obj));
+        }
+
         const int n = nIndexesBeingBuilt();
         DB *dbs[n];
-        DBTArrays keyArrays(n);
-        DBTArrays valArrays(n);
+        storage::DBTArrays keyArrays(n);
+        storage::DBTArrays valArrays(n);
         uint32_t put_flags[n];
 
         storage::Key sPK(pk, NULL);
-        DBT src_key = storage::make_dbt(sPK.buf(), sPK.size());
-        DBT src_val = storage::make_dbt(obj.objdata(), obj.objsize());
+        DBT src_key = storage::dbt_make(sPK.buf(), sPK.size());
+        DBT src_val = storage::dbt_make(obj.objdata(), obj.objsize());
 
         for (int i = 0; i < n; i++) {
             const bool isPK = i == 0;
@@ -1095,6 +1155,12 @@ namespace mongo {
             // Secondary key uniqueness checks are done below, if necessary.
             put_flags[i] = (isPK && doUniqueChecks ? DB_NOOVERWRITE : 0) |
                            (prelocked ? DB_PRELOCKED_WRITE : 0);
+
+            // It is not our responsibility to set the multikey bits
+            // for a hot index. Further, a hot index cannot be unique,
+            if (i >= _nIndexes) {
+                continue;
+            }
 
             BSONObjSet idxKeys;
             if (!isPK) {
@@ -1126,7 +1192,7 @@ namespace mongo {
         // The PK is always used, only secondarys may have keys generated.
         getPKIndex().noteInsert();
         for (int i = 0; i < n; i++) {
-            const DBT_ARRAY *array = &keyArrays.arrays()[i];
+            const DBT_ARRAY *array = &keyArrays[i];
             if (array->size > 0) {
                 IndexDetails &idx = *_indexes[i];
                 dassert(!isPKIndex(idx));
@@ -1141,12 +1207,12 @@ namespace mongo {
 
         const int n = nIndexesBeingBuilt();
         DB *dbs[n];
-        DBTArrays keyArrays(n);
+        storage::DBTArrays keyArrays(n);
         uint32_t del_flags[n];
 
         storage::Key sPK(pk, NULL);
-        DBT src_key = storage::make_dbt(sPK.buf(), sPK.size());
-        DBT src_val = storage::make_dbt(obj.objdata(), obj.objsize());
+        DBT src_key = storage::dbt_make(sPK.buf(), sPK.size());
+        DBT src_val = storage::dbt_make(obj.objdata(), obj.objsize());
 
         for (int i = 0; i < n; i++) {
             const bool prelocked = flags & NamespaceDetails::NO_LOCKTREE;
@@ -1168,7 +1234,7 @@ namespace mongo {
         // The PK is always used, only secondarys may have keys generated.
         getPKIndex().noteDelete();
         for (int i = 0; i < n; i++) {
-            const DBT_ARRAY *array = &keyArrays.arrays()[i];
+            const DBT_ARRAY *array = &keyArrays[i];
             if (array->size > 0) {
                 IndexDetails &idx = *_indexes[i];
                 dassert(!isPKIndex(idx));
@@ -1203,16 +1269,20 @@ namespace mongo {
         dassert(!oldObj.isEmpty());
         dassert(!newObj.isEmpty());
 
+        if (isSystemUsersCollection(_ns)) {
+            uassertStatusOK(AuthorizationManager::checkValidPrivilegeDocument(nsToDatabaseSubstring(_ns), newObj));
+        }
+
         const int n = nIndexesBeingBuilt();
         DB *dbs[n];
-        DBTArrays keyArrays(n * 2);
-        DBTArrays valArrays(n);
+        storage::DBTArrays keyArrays(n * 2);
+        storage::DBTArrays valArrays(n);
         uint32_t update_flags[n];
 
         storage::Key sPK(pk, NULL);
-        DBT src_key = storage::make_dbt(sPK.buf(), sPK.size());
-        DBT new_src_val = storage::make_dbt(newObj.objdata(), newObj.objsize());
-        DBT old_src_val = storage::make_dbt(oldObj.objdata(), oldObj.objsize());
+        DBT src_key = storage::dbt_make(sPK.buf(), sPK.size());
+        DBT new_src_val = storage::dbt_make(newObj.objdata(), newObj.objsize());
+        DBT old_src_val = storage::dbt_make(oldObj.objdata(), oldObj.objsize());
 
         // Generate keys for each index, prepare data structures for del multiple.
         // We will end up abandoning del multiple if there are any multikey indexes.
@@ -1223,6 +1293,12 @@ namespace mongo {
             IndexDetails &idx = *_indexes[i];
             dbs[i] = idx.db();
             update_flags[i] = prelocked ? DB_PRELOCKED_WRITE : 0;
+
+            // It is not our responsibility to set the multikey bits
+            // for a hot index. Further, a hot index cannot be unique,
+            if (i >= _nIndexes) {
+                continue;
+            }
 
             if (!isPK) {
                 BSONObjSet oldIdxKeys;
@@ -1296,6 +1372,8 @@ namespace mongo {
 
     // Wrapper for offline (write locked) indexing.
     void NamespaceDetails::createIndex(const BSONObj &info) {
+        const string sourceNS = info["ns"].String();
+
         if (!Lock::isWriteLocked(_ns)) {
             throw RetryWithWriteLock();
         }
@@ -1307,11 +1385,21 @@ namespace mongo {
     }
 
     void NamespaceDetails::dropIndex(const int idxNum) {
+        verify(!_indexBuildInProgress);
         verify(idxNum < (int) _indexes.size());
+
+        // Note this ns in the rollback so if this transaction aborts, we'll
+        // close this ns, forcing the next user to reload in-memory metadata.
+        NamespaceIndexRollback &rollback = cc().txn().nsIndexRollback();
+        rollback.noteNs(_ns);
+
         IndexDetails &idx = *_indexes[idxNum];
         idx.kill_idx();
         _indexes.erase(_indexes.begin() + idxNum);
         _nIndexes--;
+        // Removes the nth bit, and shifts any bits higher than it down a slot.
+        _multiKeyIndexBits = ((_multiKeyIndexBits & ((1ULL << idxNum) - 1)) |
+                             ((_multiKeyIndexBits >> (idxNum + 1)) << idxNum));
         resetTransient();
     }
 
@@ -1322,11 +1410,6 @@ namespace mongo {
     bool NamespaceDetails::dropIndexes(const StringData& ns, const StringData& name, string &errmsg, BSONObjBuilder &result, bool mayDeleteIdIndex) {
         Lock::assertWriteLocked(ns);
         TOKULOG(1) << "dropIndexes " << name << endl;
-
-        // Note this ns in the rollback so if this transaction aborts, we'll
-        // close this ns, forcing the next user to reload in-memory metadata.
-        NamespaceIndexRollback &rollback = cc().txn().nsIndexRollback();
-        rollback.noteNs(_ns);
 
         NamespaceDetails *d = nsdetails(ns);
         ClientCursor::invalidate(ns);
@@ -1339,7 +1422,6 @@ namespace mongo {
 
         if (name == "*") {
             result.append("nIndexesWas", (double) _nIndexes);
-            // This is O(n^2), not great, but you can have at most 64 indexes anyway.
             for (int i = 0; i < _nIndexes; ) {
                 IndexDetails &idx = *_indexes[i];
                 if (mayDeleteIdIndex || (!idx.isIdIndex() && !d->isPKIndex(idx))) {
@@ -1348,8 +1430,8 @@ namespace mongo {
                     i++;
                 }
             }
-            // Assuming id index isn't multikey
-            _multiKeyIndexBits = 0;
+            // Assuming id/pk index isn't multikey
+            verify(_multiKeyIndexBits == 0);
             result.append("msg", (mayDeleteIdIndex
                                   ? "indexes dropped for collection"
                                   : "non-_id indexes dropped for collection"));
@@ -1363,15 +1445,13 @@ namespace mongo {
                     return false;
                 }
                 dropIndex(idxNum);
-                // Removes the nth bit, and shifts any bits higher than it down a slot.
-                _multiKeyIndexBits = ((_multiKeyIndexBits & ((1ULL << idxNum) - 1)) |
-                                     ((_multiKeyIndexBits >> (idxNum + 1)) << idxNum));
             } else {
                 log() << "dropIndexes: " << name << " not found" << endl;
                 errmsg = "index not found";
                 return false;
             }
         }
+
         // Updated whatever in memory structures are necessary, now update the nsindex.
         nsindex(ns)->update_ns(ns, serialize(), true);
         return true;
@@ -1452,23 +1532,11 @@ namespace mongo {
         fillSpecificStats(result, scale);
     }
 
-    static void addIndexToCatalog(const BSONObj &info) {
-        const StringData &indexns = info["ns"].Stringdata();
-        if (indexns.find(".system.indexes") != string::npos) {
-            // system.indexes holds all the others, so it is not explicitly listed in the catalog.
-            return;
-        }
-
-        StringData database = nsToDatabaseSubstring(indexns);
-        string ns = database.toString() + ".system.indexes";
-        NamespaceDetails *d = nsdetails_maybe_create(ns);
-        BSONObj objMod = info;
-        insertOneObject(d, objMod);
-    }
-
     void NamespaceDetails::addDefaultIndexesToCatalog() {
         // Either a single primary key or a hidden primary key + _id index.
-        dassert(_nIndexes == 1 || (_nIndexes == 2 && findIdIndex() == 1));
+        // TODO: this is now incorrect in the case of system.users collections, need to fix it and
+        //uncomment it:
+        //dassert(_nIndexes == 1 || (_nIndexes == 2 && findIdIndex() == 1));
         for (int i = 0; i < nIndexes(); i++) {
             addIndexToCatalog(_indexes[i]->info());
         }
@@ -1507,7 +1575,7 @@ namespace mongo {
 
     bool userCreateNS(const StringData& ns, BSONObj options, string& err, bool logForReplication) {
         StringData coll = ns.substr(ns.find('.') + 1);
-        massert( 16451 ,  str::stream() << "invalid ns: " << ns , NamespaceString::validCollectionName(ns.rawData()));
+        massert( 16451 ,  str::stream() << "invalid ns: " << ns , NamespaceString::validCollectionName(ns));
         StringData cl = nsToDatabaseSubstring( ns );
         if (nsdetails(ns) != NULL) {
             // Namespace already exists
@@ -1582,11 +1650,10 @@ namespace mongo {
         // Check that we are allowed to drop the namespace.
         StringData database = nsToDatabaseSubstring(name);
         verify(database == cc().database()->name());
-        StringData coll = name.substr(name.find('.') + 1);
-        if (coll.startsWith("system.")) {
-            if (coll == "system.profile") {
+        if (NamespaceString::isSystem(name) && !can_drop_system) {
+            if (nsToCollectionSubstring(name) == "system.profile") {
                 uassert(10087, "turn off profiling before dropping system.profile collection", cc().database()->profile() == 0);
-            } else if (!can_drop_system) {
+            } else {
                 uasserted(12502, "can't drop system ns");
             }
         }
@@ -1610,7 +1677,8 @@ namespace mongo {
     */
     void addNewNamespaceToCatalog(const StringData& ns, const BSONObj *options) {
         LOG(1) << "New namespace: " << ns << endl;
-        if (ns.find(".system.namespaces") != string::npos) {
+        StringData coll = nsToCollectionSubstring(ns);
+        if (coll.startsWith("system.namespaces")) {
             // system.namespaces holds all the others, so it is not explicitly listed in the catalog.
             return;
         }
@@ -1622,22 +1690,22 @@ namespace mongo {
         }
         BSONObj info = b.done();
 
-        StringData database = nsToDatabaseSubstring(ns);
-        string system_ns = database.toString() + ".system.namespaces";
+        string system_ns = getSisterNS(ns, "system.namespaces");
         NamespaceDetails *d = nsdetails_maybe_create(system_ns);
         insertOneObject(d, info);
     }
 
     void removeNamespaceFromCatalog(const StringData& ns) {
-        if (ns.find(".system.namespaces") == string::npos) {
-            string system_namespaces = cc().database()->name() + ".system.namespaces";
+        StringData coll = nsToCollectionSubstring(ns);
+        if (!coll.startsWith("system.namespaces")) {
+            string system_namespaces = getSisterNS(cc().database()->name(), "system.namespaces");
             _deleteObjects(system_namespaces.c_str(),
                            BSON("name" << ns), false, false);
         }
     }
 
     void removeFromSysIndexes(const StringData& ns, const StringData& name) {
-        string system_indexes = cc().database()->name() + ".system.indexes";
+        string system_indexes = getSisterNS(cc().database()->name(), "system.indexes");
         BSONObj obj = BSON("ns" << ns << "name" << name);
         TOKULOG(2) << "removeFromSysIndexes removing " << obj << endl;
         const int n = _deleteObjects(system_indexes.c_str(), obj, false, false);
@@ -1658,7 +1726,7 @@ namespace mongo {
         return b.obj();
     }
 
-    void renameNamespace(const StringData& from, const StringData& to, bool stayTemp) {
+    void renameNamespace(const StringData& from, const StringData& to) {
         Lock::assertWriteLocked(from);
 
         NamespaceDetails *from_details = nsdetails(from);
@@ -1673,9 +1741,8 @@ namespace mongo {
         // Kill open cursors before we close and rename the namespace
         ClientCursor::invalidate( from );
 
-        StringData database = nsToDatabaseSubstring(from);
-        string sysIndexes = database.toString() + ".system.indexes";
-        string sysNamespaces = database.toString() + ".system.namespaces";
+        string sysIndexes = getSisterNS(from, "system.indexes");
+        string sysNamespaces = getSisterNS(from, "system.namespaces");
 
         // Generate the serialized form of the namespace, and then close it.
         // This will close the underlying dictionaries and allow us to
@@ -1728,9 +1795,7 @@ namespace mongo {
             while ( i.more() ) {
                 BSONElement e = i.next();
                 if ( strcmp( e.fieldName(), "create" ) != 0 ) {
-                    if (stayTemp || (strcmp(e.fieldName(), "temp") != 0)) {
-                        b.append( e );
-                    }
+                    b.append( e );
                 }
                 else {
                     b << "create" << to;
@@ -1766,7 +1831,7 @@ namespace mongo {
         uassert( 16873, "Cannot bulk load a collection that already exists.",
                         nsdetails(ns) == NULL );
         uassert( 16998, "Cannot bulk load a system collection",
-                        ns.find(".system.") == string::npos );
+                        !NamespaceString::isSystem(ns) );
         uassert( 16999, "Cannot bulk load a capped collection",
                         !options["capped"].trueValue() );
         uassert( 17000, "Cannot bulk load a natural order collection",
@@ -1824,10 +1889,12 @@ namespace mongo {
     bool legalClientSystemNS( const StringData& ns , bool write ) {
         if( ns == "local.system.replset" ) return true;
 
-        if ( ns.find( ".system.users" ) != string::npos )
+        StringData collstr = nsToCollectionSubstring(ns);
+        if ( collstr == "system.users" ) {
             return true;
+        }
 
-        if ( ns.find( ".system.js" ) != string::npos ) {
+        if ( collstr == "system.js" ) {
             if ( write )
                 Scope::storedFuncMod();
             return true;

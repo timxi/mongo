@@ -27,11 +27,11 @@
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/cmdline.h"
-#include "mongo/db/commands/fail_point_cmd.h"
 #include "mongo/db/d_concurrency.h"
 #include "mongo/db/d_globals.h"
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/dbwebserver.h"
+#include "mongo/db/initialize_server_global_state.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/introspect.h"
 #include "mongo/db/json.h"
@@ -49,6 +49,7 @@
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/task.h"
 #include "mongo/util/net/message_server.h"
+#include "mongo/util/ntservice.h"
 #include "mongo/util/ramlog.h"
 #include "mongo/util/stacktrace.h"
 #include "mongo/util/startup_test.h"
@@ -56,7 +57,6 @@
 #include "mongo/util/version.h"
 
 #if defined(_WIN32)
-# include "mongo/util/ntservice.h"
 # include <DbgHelp.h>
 #else
 # include <sys/file.h>
@@ -76,7 +76,7 @@ namespace mongo {
     void exitCleanly( ExitCode code );
 
 #ifdef _WIN32
-    ntServiceDefaultStrings defaultServiceStrings = {
+    ntservice::NtServiceDefaultStrings defaultServiceStrings = {
         L"MongoDB",
         L"Mongo DB",
         L"Mongo DB Server"
@@ -162,9 +162,7 @@ namespace mongo {
     class MyMessageHandler : public MessageHandler {
     public:
         virtual void connected( AbstractMessagingPort* p ) {
-            Client& c = Client::initThread("conn", p);
-            if( p->remote().isLocalHost() )
-                c.getAuthenticationInfo()->setIsALocalHostConnectionWithSpecialAuthPowers();
+            Client::initThread("conn", p);
         }
 
         virtual void process( Message& m , AbstractMessagingPort* port , LastError * le) {
@@ -218,10 +216,39 @@ namespace mongo {
         virtual void disconnected( AbstractMessagingPort* p ) {
             Client * c = currentClient.get();
             if( c ) c->shutdown();
-            globalScriptEngine->threadDone();
         }
 
     };
+
+    void logStartup() {
+        BSONObjBuilder toLog;
+        stringstream id;
+        id << getHostNameCached() << "-" << jsTime();
+        toLog.append( "_id", id.str() );
+        toLog.append( "hostname", getHostNameCached() );
+
+        toLog.appendTimeT( "startTime", time(0) );
+        char buf[64];
+        curTimeString( buf );
+        toLog.append( "startTimeLocal", buf );
+
+        toLog.append( "cmdLine", CmdLine::getParsedOpts() );
+        toLog.append( "pid", getpid() );
+
+
+        BSONObjBuilder buildinfo( toLog.subobjStart("buildinfo"));
+        appendBuildInfo(buildinfo);
+        buildinfo.doneFast();
+
+        BSONObj o = toLog.obj();
+
+        Lock::GlobalWrite lk;
+        Client::GodScope gs;
+        DBDirectClient c;
+        const char* name = "local.startup_log";
+        c.createCollection( name, 10 * 1024 * 1024, true );
+        c.insert( name, o);
+    }
 
     void listen(int port) {
         //testTheDb();
@@ -232,6 +259,7 @@ namespace mongo {
         MessageServer * server = createServer( options , new MyMessageHandler() );
         server->setAsTimeTracker();
 
+        logStartup();
         startReplication();
         if ( !noHttpInterface )
             boost::thread web( boost::bind(&webServerThread, new RestAdminAccess() /* takes ownership */));
@@ -257,38 +285,6 @@ namespace mongo {
             return c.count("local.system.replset");
         }
         return 0;
-    }
-
-    void clearTmpCollections() {
-        Lock::GlobalWrite lk;
-        Client::GodScope gs;
-        vector< string > toDelete;
-        DBDirectClient cli;
-        {
-            // We don't want to get read locks on system.namespaces,
-            // so chose a snapshot transaction. We'll do the actual
-            // drops in _dropTempCollections, outside of this txn.
-            Client::Transaction txn(DB_TXN_SNAPSHOT);
-            vector< string > dbNames;
-            getDatabaseNames( dbNames );
-            for (vector<string>::const_iterator it(dbNames.begin()), end(dbNames.end()); it != end; ++it){
-                const string coll = *it + ".system.namespaces";
-                scoped_ptr< DBClientCursor > c (cli.query(coll, Query( fromjson( "{'options.temp': {$in: [true, 1]}}" ) ) ));
-                while( c->more() ) {
-                    BSONObj o = c->next();
-                    toDelete.push_back( o.getStringField( "name" ) );
-                }
-            }
-            txn.commit();
-        }
-        {
-            Client::Transaction txn(DB_SERIALIZABLE);
-            for( vector< string >::iterator i = toDelete.begin(); i != toDelete.end(); ++i ) {
-                log() << "Dropping old temporary collection: " << *i << endl;
-                cli.dropCollection( *i );
-            }
-            txn.commit();
-        }
     }
 
     const char * jsInterruptCallback() {
@@ -344,9 +340,6 @@ namespace mongo {
         setTxnCompleteHooks(&_txnCompleteHooks);
         storage::startup();
 
-        // comes after storage::startup() because this reads from the database
-        clearTmpCollections();
-
         unsigned long long missingRepl = checkIfReplMissingFromCommandLine();
         if (missingRepl) {
             log() << startupWarningsLog;
@@ -369,9 +362,9 @@ namespace mongo {
         srand((unsigned) (curTimeMicros() ^ startupSrandTimer.micros()));
 
         if (!cmdLine.pluginsDir.empty()) {
-            plugins::loader.setPluginsDir(cmdLine.pluginsDir);
+            plugins::loader->setPluginsDir(cmdLine.pluginsDir);
         }
-        plugins::loader.autoload(cmdLine.plugins);
+        plugins::loader->autoload(cmdLine.plugins);
 
         snapshotThread.go();
         d.clientCursorMonitor.go();
@@ -394,7 +387,7 @@ namespace mongo {
         if( !noauth ) {
             // open admin db in case we need to use it later. TODO this is not the right way to
             // resolve this.
-            Client::WriteContext c("admin",dbpath,false);
+            Client::WriteContext c("admin", dbpath);
         }
 
         listen(listenPort);
@@ -426,11 +419,10 @@ namespace mongo {
     }
 
 #if defined(_WIN32)
-    bool initService() {
-        ServiceController::reportStatus( SERVICE_RUNNING );
+    void initService() {
+        ntservice::reportStatus( SERVICE_RUNNING );
         log() << "Service running" << endl;
         initAndListen( cmdLine.port );
-        return true;
     }
 #endif
 
@@ -447,11 +439,6 @@ void show_help_text(po::options_description options) {
     cout << options << endl;
 };
 
-/* Return error string or "" if no errors. */
-string arg_error_check(int argc, char* argv[]) {
-    return "";
-}
-
 static int mongoDbMain(int argc, char* argv[], char** envp);
 
 int main(int argc, char* argv[], char** envp) {
@@ -459,12 +446,13 @@ int main(int argc, char* argv[], char** envp) {
     ::_exit(exitCode);
 }
 
-static int mongoDbMain(int argc, char* argv[], char **envp) {
-    static StaticObserver staticObserver;
+static void buildOptionsDescriptions(po::options_description *pVisible,
+                                     po::options_description *pHidden,
+                                     po::positional_options_description *pPositional) {
 
-    mongo::runGlobalInitializersOrDie(argc, argv, envp);
-
-    getcurns = ourgetns;
+    po::options_description& visible_options = *pVisible;
+    po::options_description& hidden_options = *pHidden;
+    po::positional_options_description& positional_options = *pPositional;
 
     po::options_description general_options("General options");
 #if defined(_WIN32)
@@ -474,11 +462,7 @@ static int mongoDbMain(int argc, char* argv[], char **envp) {
     po::options_description ms_options("Master/slave options");
     po::options_description rs_options("Replica set options");
     po::options_description sharding_options("Sharding options");
-    po::options_description visible_options("Allowed options");
-    po::options_description hidden_options("Hidden options");
     po::options_description ssl_options("SSL options");
-
-    po::positional_options_description positional_options;
 
     CmdLine::addGlobalOptions( general_options , hidden_options , ssl_options );
 
@@ -498,7 +482,7 @@ static int mongoDbMain(int argc, char* argv[], char **envp) {
     ("fsRedzone", po::value<int>(), "percentage of free-space left on device before the system goes read-only.")
     ("logDir", po::value<string>(), "directory to store transaction log files (default is --dbpath)")
     ("tmpDir", po::value<string>(), "directory to store temporary bulk loader files (default is --dbpath)")
-    ("gdb", "go into a debug-friendly mode, disabling TTL and SIGINT/TERM handlers (development use only).")
+    ("debug", "go into a debug-friendly mode (development use only).")
     ("gdbPath", po::value<string>(), "if specified, debugging information will be gathered on fatal error by launching gdb at the given path")
     ("ipv6", "enable IPv6 support (disabled by default)")
     ("journal", "DEPRECATED")
@@ -508,8 +492,9 @@ static int mongoDbMain(int argc, char* argv[], char **envp) {
     ("expireOplogHours", po::value<uint32_t>(), "how many hours, in addition to expireOplogDays, of oplog data to keep")
     ("journalOptions", po::value<int>(), "DEPRECATED")
     ("jsonp","allow JSONP access via http (has security implications)")
-    ("lockTimeout", po::value<uint64_t>(), "tokumx row lock wait timeout (in ms), 0 means wait as long as necessary")
+    ("lockTimeout", po::value(&cmdLine.lockTimeout), "tokumx row lock wait timeout (in ms), 0 means wait as long as necessary")
     ("locktreeMaxMemory", po::value(&cmdLine.locktreeMaxMemory), "tokumx memory limit (in bytes) for storing transactions' row locks.")
+    ("loaderMaxMemory", po::value(&cmdLine.loaderMaxMemory), "tokumx memory limit (in bytes) for a single bulk loader to use. the bulk loader is used to build foreground indexes and is also utilized by mongorestore/import")
     ("noauth", "run without security")
     ("nohttpinterface", "disable http interface")
     ("nojournal", "DEPRECATED)")
@@ -590,54 +575,39 @@ static int mongoDbMain(int argc, char* argv[], char **envp) {
     visible_options.add(ssl_options);
 #endif
     Module::addOptions( visible_options );
+}
 
-
-    setupCoreSignals();
-    setupQuittingSignals();
-
-    dbExecCommand = argv[0];
-
-    srand(curTimeMicros());
-#if( BOOST_VERSION >= 104500 )
-    boost::filesystem::path::default_name_check( boost::filesystem2::no_check );
-#else
-    boost::filesystem::path::default_name_check( boost::filesystem::no_check );
-#endif
-
-    {
-        unsigned x = 0x12345678;
-        unsigned char& b = (unsigned char&) x;
-        if ( b != 0x78 ) {
-            out() << "big endian cpus not yet supported" << endl;
-            return 33;
-        }
-    }
-
-    if( argc == 1 )
-        cout << dbExecCommand << " --help for help and startup options" << endl;
+static void processCommandLineOptions(const std::vector<std::string>& argv) {
+    po::options_description visible_options("Allowed options");
+    po::options_description hidden_options("Hidden options");
+    po::positional_options_description positional_options;
+    buildOptionsDescriptions(&visible_options, &hidden_options, &positional_options);
 
     {
         po::variables_map params;
 
-        string error_message = arg_error_check(argc, argv);
-        if (error_message != "") {
-            cout << error_message << endl << endl;
-            show_help_text(visible_options);
-            return 0;
+        if (!CmdLine::store(argv,
+                            visible_options,
+                            hidden_options,
+                            positional_options,
+                            params)) {
+            ::_exit(EXIT_FAILURE);
         }
-
-        if ( ! CmdLine::store( argc , argv , visible_options , hidden_options , positional_options , params ) )
-            return 0;
 
         if (params.count("help")) {
             show_help_text(visible_options);
-            return 0;
+            ::_exit(EXIT_SUCCESS);
         }
         if (params.count("version")) {
             cout << mongodVersion() << endl;
             printGitVersion();
-            return 0;
+            ::_exit(EXIT_SUCCESS);
         }
+        if (params.count("sysinfo")) {
+            sysRuntimeInfo();
+            ::_exit(EXIT_SUCCESS);
+        }
+
         if ( params.count( "dbpath" ) ) {
             dbpath = params["dbpath"].as<string>();
             if ( params.count( "fork" ) && dbpath[0] != '/' ) {
@@ -791,10 +761,6 @@ static int mongoDbMain(int argc, char* argv[], char **envp) {
             }
             _diaglog.setLevel(x);
         }
-        if (params.count("sysinfo")) {
-            sysRuntimeInfo();
-            return 0;
-        }
         if (params.count("repair")) {
             out() << " repair is a deprecated parameter." << endl;
         }
@@ -862,6 +828,13 @@ static int mongoDbMain(int argc, char* argv[], char **envp) {
                 dbexit( EXIT_BADOPTIONS );
             }
         }
+        if (params.count("loaderMaxMemory")) {
+            uint64_t x = (uint64_t) params["loaderMaxMemory"].as<BytesQuantity<uint64_t> >();
+            if (x < 32 * 1024 * 1024) {
+                out() << "bad --loaderMaxMemory arg (should never be less than 32mb)" << endl;
+                dbexit( EXIT_BADOPTIONS );
+            }
+        }
         if (params.count("port") == 0 ) {
             if( params.count("configsvr") ) {
                 cmdLine.port = CmdLine::ConfigServerPort;
@@ -911,33 +884,40 @@ static int mongoDbMain(int argc, char* argv[], char **envp) {
         if (params.count("command")) {
             vector<string> command = params["command"].as< vector<string> >();
 
-            if (command[0].compare("run") == 0) {
-                if (command.size() > 1) {
-                    cout << "Too many parameters to 'run' command" << endl;
-                    cout << visible_options << endl;
-                    return 0;
-                }
-
-                initAndListen(cmdLine.port);
-                return 0;
-            }
-
             if (command[0].compare("dbpath") == 0) {
                 cout << dbpath << endl;
-                return 0;
+                ::_exit(EXIT_SUCCESS);
             }
 
-            cout << "Invalid command: " << command[0] << endl;
-            cout << visible_options << endl;
-            return 0;
+            if (command[0].compare("run") != 0) {
+                cout << "Invalid command: " << command[0] << endl;
+                cout << visible_options << endl;
+                ::_exit(EXIT_FAILURE);
+            }
+
+            if (command.size() > 1) {
+                cout << "Too many parameters to 'run' command" << endl;
+                cout << visible_options << endl;
+                ::_exit(EXIT_FAILURE);
+            }
         }
 
+
+        Module::configAll(params);
+
+#ifdef _WIN32
+        ntservice::configureService(initService,
+                                    params,
+                                    defaultServiceStrings,
+                                    std::vector<std::string>(),
+                                    argv);
+#endif  // _WIN32
 
 #ifdef __linux__
         if (params.count("shutdown")){
             bool failed = false;
 
-            string name = ( boost::filesystem::path( dbpath ) / "mongod.lock" ).native_file_string();
+            string name = ( boost::filesystem::path( dbpath ) / "mongod.lock" ).string();
             if ( !boost::filesystem::exists( name ) || boost::filesystem::file_size( name ) == 0 )
                 failed = true;
 
@@ -959,7 +939,7 @@ static int mongoDbMain(int argc, char* argv[], char **envp) {
 
             if (failed) {
                 cerr << "There doesn't seem to be a server running with dbpath: " << dbpath << endl;
-                ::_exit(-1);
+                ::_exit(EXIT_FAILURE);
             }
 
             cout << "killing process with pid: " << pid << endl;
@@ -967,32 +947,57 @@ static int mongoDbMain(int argc, char* argv[], char **envp) {
             if (ret) {
                 int e = errno;
                 cerr << "failed to kill process: " << errnoWithDescription(e) << endl;
-                ::_exit(-1);
+                ::_exit(EXIT_FAILURE);
             }
 
             while (boost::filesystem::exists(procPath)) {
                 sleepsecs(1);
             }
 
-            ::_exit(0);
+            ::_exit(EXIT_SUCCESS);
         }
 #endif
+    }
+}
 
-#if defined(_WIN32)
-        vector<string> disallowedOptions;
-        if (serviceParamsCheck( params, dbpath, defaultServiceStrings, disallowedOptions, argc, argv )) {
-            return 0;   // this means that we are running as a service, and we won't
-                        // reach this statement until initService() has run and returned,
-                        // but it usually exits directly so we never actually get here
-        }
-        // if we reach here, then we are not running as a service.  service installation
-        // exits directly and so never reaches here either.
-#endif
+static int mongoDbMain(int argc, char* argv[], char **envp) {
+    static StaticObserver staticObserver;
 
-        if (params.count("enableFaultInjection")) {
-            enableFailPointCmd();
+    getcurns = ourgetns;
+
+    setupCoreSignals();
+    setupQuittingSignals();
+
+    dbExecCommand = argv[0];
+
+    srand(curTimeMicros());
+
+    {
+        unsigned x = 0x12345678;
+        unsigned char& b = (unsigned char&) x;
+        if ( b != 0x78 ) {
+            out() << "big endian cpus not yet supported" << endl;
+            return 33;
         }
     }
+
+    if( argc == 1 )
+        cout << dbExecCommand << " --help for help and startup options" << endl;
+
+
+    processCommandLineOptions(std::vector<std::string>(argv, argv + argc));
+    mongo::runGlobalInitializersOrDie(argc, argv, envp);
+    CmdLine::censor(argc, argv);
+
+    if (!initializeServerGlobalState())
+        ::_exit(EXIT_FAILURE);
+
+#if defined(_WIN32)
+    if (ntservice::shouldStartService()) {
+        ntservice::startService();
+        // exits directly and so never reaches here either.
+    }
+#endif
 
     setupSignals( false );
 
@@ -1115,7 +1120,7 @@ namespace mongo {
 
     void setupSignals( bool ignored ) {
         sigemptyset( &asyncSignals );
-        if ( !cmdLine.gdb ) {
+        if ( !cmdLine.debug ) {
             sigaddset( &asyncSignals, SIGINT );
             sigaddset( &asyncSignals, SIGTERM );
             sigaddset( &asyncSignals, SIGUSR1 );

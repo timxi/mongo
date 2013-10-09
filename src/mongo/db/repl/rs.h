@@ -78,6 +78,9 @@ namespace mongo {
 
         bool potentiallyHot() const { return _config.potentiallyHot(); } // not arbiter, not priority 0
         void summarizeMember(stringstream& s) const;
+        // If we could sync from this member.  This doesn't tell us anything about the quality of
+        // this member, just if they are a possible sync target.
+        bool syncable() const;
 
     private:
         friend class ReplSetImpl;
@@ -345,6 +348,9 @@ namespace mongo {
         // rslock.
         boost::mutex stateChangeMutex;
         bool forceSyncFrom(const string& host, string& errmsg, BSONObjBuilder& result);
+        // Check if the current sync target is suboptimal. This must be called while holding a mutex
+        // that prevents the sync source from changing.
+        bool shouldChangeSyncTarget(const uint64_t& target) const;
 
         /**
          * Find the closest member (using ping time) with a higher latest GTID.
@@ -460,11 +466,6 @@ namespace mongo {
         void _summarizeAsHtml(stringstream&) const;
         void _summarizeStatus(BSONObjBuilder&) const; // for replSetGetStatus command
 
-        /* throws exception if a problem initializing. */
-        ReplSetImpl(ReplSetCmdline&);
-        // used for testing
-        ReplSetImpl();
-
         /* call afer constructing to start - returns fairly quickly after launching its threads */
         void _go();
 
@@ -477,7 +478,7 @@ namespace mongo {
          * Finds the configuration with the highest version number and attempts
          * load it.
          */
-        bool _loadConfigFinish(vector<ReplSetConfig>& v);
+        bool _loadConfigFinish(vector<ReplSetConfig*>& v);
         /**
          * Gather all possible configs (from command line seeds, our own config
          * doc, and any hosts listed therein) and try to initiate from the most
@@ -495,6 +496,11 @@ namespace mongo {
     protected:
         Member *_self;
         bool _buildIndexes;       // = _self->config().buildIndexes
+
+        ReplSetImpl();
+        /* throws exception if a problem initializing. */
+        void init(ReplSetCmdline&);
+
         void setSelfTo(Member *); // use this as it sets buildIndexes var
     private:
         List1<Member> _members; // all members of the set EXCEPT _self.
@@ -550,6 +556,7 @@ namespace mongo {
         map<string,time_t> _veto;
 
     public:
+        static const int maxSyncSourceLagSecs;
 
         const ReplSetConfig::MemberCfg& myConfig() const { return _config; }
         void tryToGoLiveAsASecondary(); // readlocks
@@ -565,8 +572,7 @@ namespace mongo {
 
     class ReplSet : public ReplSetImpl {
     public:
-        ReplSet();
-        ReplSet(ReplSetCmdline& replSetCmdline);
+        static ReplSet* make(ReplSetCmdline& replSetCmdline);
         virtual ~ReplSet() {}
 
         // for the replSetStepDown command
@@ -620,6 +626,9 @@ namespace mongo {
             if( time(0)-_hbmsgTime > 120 ) return "";
             return _hbmsg;
         }
+
+    protected:
+        ReplSet();
     };
 
     /**
@@ -639,22 +648,6 @@ namespace mongo {
         virtual bool canRunInMultiStmtTxn() const { return true; }
         virtual void help( stringstream &help ) const { help << "internal"; }
 
-        /**
-         * Some replica set commands call this and then call check(). This is
-         * intentional, as they might do things before theReplSet is initialized
-         * that still need to be checked for auth.
-         */
-        bool checkAuth(string& errmsg, BSONObjBuilder& result) {
-            if( !noauth ) {
-                AuthenticationInfo *ai = cc().getAuthenticationInfo();
-                if (!ai->isAuthorizedForLock("admin", locktype())) {
-                    errmsg = "replSet command unauthorized";
-                    return false;
-                }
-            }
-            return true;
-        }
-
         bool check(string& errmsg, BSONObjBuilder& result) {
             if( !replSet ) {
                 errmsg = "not running with --replSet";
@@ -673,7 +666,7 @@ namespace mongo {
                 return false;
             }
 
-            return checkAuth(errmsg, result);
+            return true;
         }
     };
 

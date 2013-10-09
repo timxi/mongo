@@ -18,6 +18,7 @@
 #include "mongo/pch.h"
 
 #include "mongo/db/namespace_details.h"
+#include "mongo/db/namespacestring.h"
 #include "mongo/db/json.h"
 #include "mongo/db/relock.h"
 #include "mongo/db/storage/dictionary.h"
@@ -201,11 +202,20 @@ namespace mongo {
         BSONObj nsobj = BSON("ns" << ns);
         storage::Key sKey(nsobj, NULL);
         DBT ndbt = sKey.dbt();
-        DB_TXN *db_txn = cc().hasTxn() ? cc().txn().db_txn() : NULL;
-        DB *db = _nsdb->db();
+
+        // If this transaction is read only, then we cannot possible already
+        // hold a lock in the nsindex and we certainly don't need to hold one
+        // for the duration of this operation. So we use an alternate txn stack.
+        const bool needAltTxn = !cc().hasTxn() || cc().txn().readOnly();
+        scoped_ptr<Client::AlternateTransactionStack> altStack(!needAltTxn ? NULL :
+                                                               new Client::AlternateTransactionStack());
+        scoped_ptr<Client::Transaction> altTxn(!needAltTxn ? NULL :
+                                               new Client::Transaction(0));
+
         // Pass flags that get us a write lock on the nsindex row
         // for the ns we'd like to open.
-        const int r = db->getf_set(db, db_txn, DB_SERIALIZABLE | DB_RMW,
+        DB *db = _nsdb->db();
+        const int r = db->getf_set(db, cc().txn().db_txn(), DB_SERIALIZABLE | DB_RMW,
                                    &ndbt, getf_serialized, &serialized);
         if (r == 0) {
             // We found an entry for this ns and we have the row lock.
@@ -282,7 +292,7 @@ namespace mongo {
         BSONObj nsobj = BSON("ns" << ns);
         storage::Key sKey(nsobj, NULL);
         DBT ndbt = sKey.dbt();
-        DBT ddbt = storage::make_dbt(serialized.objdata(), serialized.objsize());
+        DBT ddbt = storage::dbt_make(serialized.objdata(), serialized.objsize());
         DB *db = _nsdb->db();
         const int flags = overwrite ? 0 : DB_NOOVERWRITE;
         const int r = db->put(db, cc().txn().db_txn(), &ndbt, &ddbt, flags);
@@ -307,16 +317,16 @@ namespace mongo {
         // - We'll look at the entire system.namespaces collection just for one database.
         // - Code is duplicated to handle dropping system system collections in stages.
         vector<string> sysIndexesEntries;
-        const string systemNamespacesNs(_database + ".system.namespaces");
+        const string systemNamespacesNs = getSisterNS(_database, "system.namespaces");
         NamespaceDetails *sysNsd = nsdetails(systemNamespacesNs);
         for (shared_ptr<Cursor> c(BasicCursor::make(sysNsd)); c->ok(); c->advance()) {
             const BSONObj nsObj = c->current();
             const StringData ns = nsObj["name"].Stringdata();
-            if (!ns.startsWith(_database)) {
+            if (nsToDatabaseSubstring(ns) != _database) {
                 // Not part of this database, skip.
                 continue;
             }
-            if (ns.find(".system.indexes") != string::npos) {
+            if (nsToCollectionSubstring(ns) == "system.indexes") {
                 // Save .system.indexes collection for last, because dropCollection deletes from it.
                 sysIndexesEntries.push_back(ns.toString());
             } else {

@@ -68,7 +68,7 @@ namespace mongo {
 
     // Rename a namespace within current 'client' db.
     // (Arguments should include db name)
-    void renameNamespace( const StringData& from, const StringData& to, bool stayTemp);
+    void renameNamespace( const StringData& from, const StringData& to );
 
     // Manage bulk loading into a namespace
     //
@@ -261,11 +261,15 @@ namespace mongo {
             return _indexBuildInProgress;
         }
 
+        const string &ns() const {
+            return _ns;
+        }
+
         // @return a BSON representation of this NamespaceDetail's state
         static BSONObj serialize(const StringData& ns, const BSONObj &options,
                                  const BSONObj &pk, unsigned long long multiKeyIndexBits,
                                  const BSONArray &indexes_array);
-        BSONObj serialize() const;
+        BSONObj serialize(const bool includeHotIndex = false) const;
 
         void fillCollectionStats(struct NamespaceDetailsAccStats* accStats, BSONObjBuilder* result, int scale) const;
 
@@ -456,11 +460,13 @@ namespace mongo {
 
         unsigned long long _multiKeyIndexBits;
 
+    protected:
+        void dropIndex(const int idxNum);
+
     private:
         set<string> _indexKeys;
         void resetTransient();
         void computeIndexKeys();
-        void dropIndex(const int idxNum);
 
         /* query cache (for query optimizer) */
         int _qcWriteCount;

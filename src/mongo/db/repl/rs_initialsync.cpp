@@ -131,11 +131,14 @@ namespace mongo {
         return true;
     }
 
+    bool Member::syncable() const {
+        bool buildIndexes = theReplSet ? theReplSet->buildIndexes() : true;
+        return hbinfo().up() && (config().buildIndexes || !buildIndexes) && state().readable();
+    }
+
     Member* ReplSetImpl::getMemberToSyncTo() {
         lock lk(this);
         GTID lastGTID = gtidManager->getLiveState();
-
-        bool buildIndexes = true;
 
         // if we have a target we've requested to sync from, use it
 
@@ -157,8 +160,6 @@ namespace mongo {
                 return NULL;
             }
 
-            buildIndexes = myConfig().buildIndexes;
-
             // If we are only allowed to sync from the primary, return that
             if (!_cfg->chainingAllowed()) {
                 // Returns NULL if we cannot reach the primary
@@ -169,24 +170,24 @@ namespace mongo {
         // find the member with the lowest ping time that has more data than me
 
         // Find primary's oplog time. Reject sync candidates that are more than
-        // MAX_SLACK_TIME seconds behind.
+        // maxSyncSourceLagSecs seconds behind.
         uint64_t primaryOpTime;
-        static const unsigned maxSlackDurationMillis = 10 * 60 * 1000; // 10 minutes
+        uint64_t maxSyncSourceLagMillis = maxSyncSourceLagSecs*1000;
         if (primary) {
             primaryOpTime = primary->hbinfo().opTime;
         }
         else {
             // choose a time that will exclude no candidates, since we don't see a primary
-            primaryOpTime = maxSlackDurationMillis;
+            primaryOpTime = maxSyncSourceLagMillis;
         }
         
-        if ( primaryOpTime < maxSlackDurationMillis ) {
+        if ( primaryOpTime < maxSyncSourceLagMillis ) {
             // erh - I think this means there was just a new election
             // and we don't yet know the new primary's optime
-            primaryOpTime = maxSlackDurationMillis;
+            primaryOpTime = maxSyncSourceLagMillis;
         }
 
-        uint64_t oldestSyncOpTime = primaryOpTime - maxSlackDurationMillis;
+        uint64_t oldestSyncOpTime = primaryOpTime - maxSyncSourceLagMillis;
 
         Member *closest = 0;
         time_t now = 0;
@@ -197,14 +198,9 @@ namespace mongo {
         // This loop attempts to set 'closest'.
         for (int attempts = 0; attempts < 2; ++attempts) {
             for (Member *m = _members.head(); m; m = m->next()) {
-                if (!m->hbinfo().up())
-                    continue;
-                // make sure members with buildIndexes sync from other members w/indexes
-                if (buildIndexes && !m->config().buildIndexes)
-                    continue;
-
-                if (!m->state().readable())
-                    continue;
+                if (!m->syncable()) {
+                     continue;
+                }
 
                 if (m->state() == MemberState::RS_SECONDARY) {
                     // only consider secondaries that are ahead of where we are
@@ -212,7 +208,7 @@ namespace mongo {
                         continue;
                     }
                     // omit secondaries that are excessively behind, on the first attempt at least.
-                    if (attempts == 0 && 
+                    if (attempts == 0 &&
                         m->hbinfo().opTime < oldestSyncOpTime) 
                     {
                         continue;
@@ -220,7 +216,7 @@ namespace mongo {
                 }
 
                 // omit nodes that are more latent than anything we've already considered
-                if (closest && 
+                if (closest &&
                     (m->hbinfo().ping > closest->hbinfo().ping))
                     continue;
 

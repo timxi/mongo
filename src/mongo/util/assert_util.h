@@ -98,11 +98,13 @@ namespace mongo {
 
         virtual const char* what() const throw() { return _ei.msg.c_str(); }
         virtual int getCode() const { return _ei.code; }
-
         virtual void appendPrefix( std::stringstream& ss ) const { }
         virtual void addContext( const std::string& str ) {
             _ei.msg = str + causedBy( _ei.msg );
         }
+
+        // context when applicable. otherwise ""
+        std::string _shard;
 
         virtual std::string toString() const;
 
@@ -265,6 +267,13 @@ namespace mongo {
     /* "user assert".  if asserts, user did something wrong, not our code */
 #define MONGO_uassert(msgid, msg, expr) (void)( MONGO_likely(!!(expr)) || (mongo::uasserted(msgid, msg), 0) )
 
+#define MONGO_uassertStatusOK(expr) do {                                  \
+        Status status = (expr);                                         \
+        if (!status.isOK())                                             \
+            uasserted(status.location() != 0 ? status.location() : status.code(), \
+                      status.reason());                                 \
+    } while(0)
+
     /* warning only - keeps going */
 #define MONGO_wassert(_Expression) (void)( MONGO_likely(!!(_Expression)) || (mongo::wasserted(#_Expression, __FILE__, __LINE__), 0) )
 #define MONGO_wunimplemented(msg) MONGO_RARELY { problem() << "tokumx unimplemented " << msg << " " << __FILE__ << ":" << __LINE__ << endl; }
@@ -293,6 +302,7 @@ namespace mongo {
 # define dassert MONGO_dassert
 # define verify MONGO_verify
 # define uassert MONGO_uassert
+# define uassertStatusOK MONGO_uassertStatusOK
 # define wassert MONGO_wassert
 # define wunimplemented MONGO_wunimplemented
 # define massert MONGO_massert

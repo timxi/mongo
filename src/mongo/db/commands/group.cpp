@@ -1,6 +1,7 @@
 // group.cpp
 
 /**
+*    Copyright (C) 2012 10gen Inc.
 *
 *    This program is free software: you can redistribute it and/or  modify
 *    it under the terms of the GNU Affero General Public License, version 3,
@@ -16,6 +17,14 @@
 */
 
 #include "mongo/pch.h"
+
+#include <vector>
+
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/action_set.h"
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/privilege.h"
+#include "mongo/db/client_basic.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/namespace_details.h"
@@ -33,7 +42,13 @@ namespace mongo {
         virtual void help( stringstream &help ) const {
             help << "http://dochub.mongodb.org/core/aggregation";
         }
-
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::find);
+            out->push_back(Privilege(parseNs(dbname, cmdObj), actions));
+        }
         BSONObj getKey( const BSONObj& obj , const BSONObj& keyPattern , ScriptingFunction func , double avgSize , Scope * s ) {
             if ( func ) {
                 BSONObjBuilder b( obj.objsize() + 32 );
@@ -60,7 +75,9 @@ namespace mongo {
                     string& errmsg,
                     BSONObjBuilder& result ) {
 
-            auto_ptr<Scope> s = globalScriptEngine->getPooledScope( realdbname, "group");
+            const string userToken = ClientBasic::getCurrent()->getAuthorizationManager()
+                                                              ->getAuthenticatedPrincipalNamesToken();
+            auto_ptr<Scope> s = globalScriptEngine->getPooledScope(realdbname, "group" + userToken);
 
             if ( reduceScope )
                 s->init( reduceScope );

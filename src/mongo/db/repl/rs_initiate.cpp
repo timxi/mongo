@@ -19,6 +19,12 @@
 */
 
 #include "pch.h"
+
+#include <vector>
+
+#include "mongo/db/auth/action_set.h"
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/privilege.h"
 #include "../cmdline.h"
 #include "../commands.h"
 #include "../../util/mongoutils/str.h"
@@ -160,6 +166,13 @@ namespace mongo {
             h << "Initiate/christen a replica set.";
             h << "\nhttp://dochub.mongodb.org/core/replicasetcommands";
         }
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::replSetInitiate);
+            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+        }
         virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             log() << "replSet replSetInitiate admin command received from client" << rsLog;
 
@@ -237,17 +250,18 @@ namespace mongo {
 
             bool parsed = false;
             try {
-                ReplSetConfig newConfig(configObj);
+                scoped_ptr<ReplSetConfig> newConfig(ReplSetConfig::make(configObj));
                 parsed = true;
 
-                if( newConfig.version > 1 ) {
+                if( newConfig->version > 1 ) {
                     errmsg = "can't initiate with a version number greater than 1";
                     return false;
                 }
 
-                log() << "replSet replSetInitiate config object parses ok, " << newConfig.members.size() << " members specified" << rsLog;
+                log() << "replSet replSetInitiate config object parses ok, " <<
+                        newConfig->members.size() << " members specified" << rsLog;
 
-                checkMembersUpForConfigChange(newConfig, result, true);
+                checkMembersUpForConfigChange(*newConfig, result, true);
 
                 log() << "replSet replSetInitiate all members seem up" << rsLog;
 
@@ -262,7 +276,7 @@ namespace mongo {
                     transaction.commit();
                 }
                 bo comment = BSON( "msg" << "initiating set");
-                newConfig.saveConfigLocally(comment, true);
+                newConfig->saveConfigLocally(comment, true);
                 log() << "replSet replSetInitiate config now saved locally.  Should come online in about a minute." << rsLog;
                 result.append("info", "Config now saved locally.  Should come online in about a minute.");
                 ReplSet::startupStatus = ReplSet::SOON;

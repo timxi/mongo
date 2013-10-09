@@ -168,6 +168,7 @@ add_option( "32" , "whether to force 32 bit" , 0 , True , "force32" )
 
 add_option( "cxx", "compiler to use" , 1 , True )
 add_option( "cc", "compiler to use for c" , 1 , True )
+add_option( "ld", "linker to use" , 1 , True )
 
 add_option( "cpppath", "Include path if you have headers in a nonstandard directory" , 1 , True )
 add_option( "libpath", "Library path if you have libraries in a nonstandard directory" , 1 , True )
@@ -217,6 +218,8 @@ add_option("smoke-port", "which port to run the mongod on for smoke tests", 1, F
 add_option("smoke-server-opts", "additional options for the mongod for smoke tests", 1 , False )
 add_option("smoke-quiet", "make smoke.py be quiet", 0 , False )
 add_option("smokeauth", "run smoke tests with --auth", 0 , False )
+
+add_option("use-sasl-client", "Support SASL authentication in the client library", 0, False)
 
 add_option( "use-system-tcmalloc", "use system version of tcmalloc library", 0, True )
 
@@ -320,7 +323,10 @@ env['_LIBDEPS'] = '$_LIBDEPS_OBJS'
 if has_option('mute'):
     env.Append( CCCOMSTR = "Compiling $TARGET" )
     env.Append( CXXCOMSTR = env["CCCOMSTR"] )
+    env.Append( SHCCCOMSTR = "Compiling $TARGET" )
+    env.Append( SHCXXCOMSTR = env["SHCCCOMSTR"] )
     env.Append( LINKCOMSTR = "Linking $TARGET" )
+    env.Append( SHLINKCOMSTR = env["LINKCOMSTR"] )
     env.Append( ARCOMSTR = "Generating library $TARGET" )
 
 if has_option('mongod-concurrency-level'):
@@ -354,6 +360,9 @@ if env['CC']:
 
 if has_option( "cc" ):
     env["CC"] = get_option( "cc" )
+
+if has_option( "ld" ):
+    env["LINK"] = get_option( "ld" )
 
 if env['PYSYSPLATFORM'] in ('linux2', 'freebsd'):
     env['LINK_LIBGROUP_START'] = '-Wl,--start-group'
@@ -722,7 +731,7 @@ if nix:
             pass
 
     if linux and has_option( "sharedclient" ):
-        env.Append( LINKFLAGS=" -Wl,--as-needed -Wl,-zdefs " )
+        env.Append( SHLINKFLAGS=" -Wl,--as-needed -Wl,-zdefs " )
 
     if linux and has_option( "gcov" ):
         env.Append( CXXFLAGS=" -fprofile-arcs -ftest-coverage " )
@@ -859,6 +868,12 @@ def doConfigure(myenv):
             v8_lib_choices = ["v8"]
         if not conf.CheckLib( v8_lib_choices ):
             Exit(1)
+
+    conf.env['MONGO_BUILD_SASL_CLIENT'] = bool(has_option("use-sasl-client"))
+    if conf.env['MONGO_BUILD_SASL_CLIENT'] and not conf.CheckLibWithHeader(
+        "sasl2", "sasl/sasl.h", "C", "sasl_version_info(0, 0, 0, 0, 0, 0);", autoadd=False):
+
+        Exit(1)
 
     # requires ports devel/libexecinfo to be installed
     if freebsd or openbsd:
@@ -1101,13 +1116,6 @@ if len(COMMAND_LINE_TARGETS) > 0 and 'uninstall' in COMMAND_LINE_TARGETS:
     BUILD_TARGETS.remove("uninstall")
     BUILD_TARGETS.append("install")
 
-clientEnv = env.Clone()
-clientEnv['CPPDEFINES'].remove('MONGO_EXPOSE_MACROS')
-
-if not use_system_version_of_library("boost"):
-    clientEnv.Append(LIBS=['boost_thread', 'boost_filesystem', 'boost_system'])
-    clientEnv.Prepend(LIBPATH=['$BUILD_DIR/third_party/boost/'])
-
 module_sconscripts = moduleconfig.get_module_sconscripts(mongo_modules)
 
 # The following symbols are exported for use in subordinate SConscript files.
@@ -1119,7 +1127,6 @@ module_sconscripts = moduleconfig.get_module_sconscripts(mongo_modules)
 # conditional decision making that hasn't been moved up to this SConstruct file,
 # and they are exported here, as well.
 Export("env")
-Export("clientEnv")
 Export("shellEnv")
 Export("testEnv")
 Export("has_option use_system_version_of_library")

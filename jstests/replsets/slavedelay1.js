@@ -29,10 +29,9 @@ doTest = function( signal ) {
 
   // insert a record
   master.foo.insert({x:1});
-  //master.runCommand({getlasterror:1, w:2});
+  replTest.awaitReplication(45000, 2);
   // put a sleep here instead of a getlasterror, because getlasterror does
   // not guarantee that the data is applied, just that it is on the slave
-  sleep(500);
   var doc = master.foo.findOne();
   assert.eq(doc.x, 1);
 
@@ -62,10 +61,7 @@ doTest = function( signal ) {
   for (var i=0; i<100; i++) {
     master.foo.insert({_id : i, "foo" : "bar"});
   }
-  master.runCommand({getlasterror:1,w:2});
-  // put a sleep here instead of a getlasterror, because getlasterror does
-  // not guarantee that the data is applied, just that it is on the slave
-  sleep(500);
+  replTest.awaitReplication(45000, 2);
 
   assert.eq(master.foo.findOne({_id : 99}).foo, "bar");
   assert.eq(slave[0].foo.findOne({_id : 99}).foo, "bar");
@@ -98,10 +94,7 @@ doTest = function( signal ) {
   // it should be all caught up now
 
   master.foo.insert({_id : 123, "x" : "foo"});
-  master.runCommand({getlasterror:1,w:2});
-  // put a sleep here instead of a getlasterror, because getlasterror does
-  // not guarantee that the data is applied, just that it is on the slave
-  sleep(500);
+  replTest.awaitReplication(45000, 2);
 
   conn.setSlaveOk();
 

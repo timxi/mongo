@@ -513,8 +513,9 @@ ReplSetTest.prototype.getLastGTID = function() {
                  });
 };
 
-ReplSetTest.prototype.awaitReplication = function(timeout) {
+ReplSetTest.prototype.awaitReplication = function(timeout, numNodes) {
     timeout = timeout || 45000;
+    numNodes = numNodes || this.liveNodes.slaves.length;
 
     this.getLastGTID();
 
@@ -524,6 +525,7 @@ ReplSetTest.prototype.awaitReplication = function(timeout) {
                  function() {
                      try {
                          var synced = true;
+                         var numSynced = 0;
                          for(var i=0; i<this.liveNodes.slaves.length; i++) {
                              var slave = this.liveNodes.slaves[i];
 
@@ -542,24 +544,24 @@ ReplSetTest.prototype.awaitReplication = function(timeout) {
                                  printjson( entry );
                                  var gtid = entry['_id'];
                                  print("ReplSetTest await GTID for " + slave + " is " + gtid.hex() + " and latest is " + this.latest.hex() );
-
-                                 synced = (synced && friendlyEqual(this.latest, gtid) && entry['a'] == true)
+                                 if (friendlyEqual(this.latest, gtid) && entry['a'] == true) {
+                                     numSynced++;
+                                 }
                              }
                              else {
                                  print( "ReplSetTest waiting for " + slave + " to have " + this.latest.hex() + " found." );
-								 if (log.find({}).sort({'$natural': -1}).limit(1).hasNext()) {
-	                                 var entry = log.find({}).sort({'$natural': -1}).limit(1).next();
-									 print ("last we currently have is: ");
-									 printjson(entry);
-								 }
-                                 synced = false;
+                                    if (log.find({}).sort({'$natural': -1}).limit(1).hasNext()) {
+                                        var entry = log.find({}).sort({'$natural': -1}).limit(1).next();
+                                        print ("last we currently have is: ");
+                                        printjson(entry);
+                                    }
                              }
                          }
 
-                         if(synced) {
-                             print("ReplSetTest await synced=" + synced);
+                         if(numSynced >= numNodes) {
+                             print("ReplSetTest await numSynced =" + numSynced);
                          }
-                         return synced;
+                         return (numSynced >= numNodes);
                      }
                      catch (e) {
                          print("ReplSetTest.awaitReplication: caught exception "+e);

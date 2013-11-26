@@ -261,7 +261,9 @@ namespace mongo {
                 numConsecutiveFailed = 0;
             }
         }
-        catch (DBException e) {
+        catch (std::exception e) {            
+            log() << "In copyOplogRefsRange, caught exception: " << e.what() << \
+                " numConsecutiveFails: " << numConsecutiveFailed << endl;
             // this behavior of trying 5 times, and then
             // trying another 5 times with a sleep
             // in the middle is completely arbitrary

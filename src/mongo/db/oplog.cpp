@@ -243,16 +243,34 @@ namespace mongo {
 
     // Copy a range of documents to the local oplog.refs collection
     static void copyOplogRefsRange(OplogReader &r, OID oid) {
-        shared_ptr<DBClientCursor> c = r.getOplogRefsCursor(oid);
-        Client::ReadContext ctx(rsOplogRefs);
-        while (c->more()) {
-            BSONObj b = c->next();
-            BSONElement eOID = b.getFieldDotted("_id.oid");
-            if (oid != eOID.OID()) {
-                break;
+        uint64_t currSeq = 0;
+        uint64_t numConsecutiveFailed = 0;
+        shared_ptr<DBClientCursor> c = r.getOplogRefsCursor(oid, currSeq);
+        try {
+            Client::ReadContext ctx(rsOplogRefs);
+            while (c->more()) {
+                BSONObj b = c->next();
+                BSONElement eOID = b.getFieldDotted("_id.oid");
+                if (oid != eOID.OID()) {
+                    break;
+                }
+                BSONElement eSeq = b.getFieldDotted("_id.seq");
+                currSeq = eSeq.Long();
+                LOG(6) << "copyOplogRefsRange " << b << endl;
+                writeEntryToOplogRefs(b);
+                numConsecutiveFailed = 0;
             }
-            LOG(6) << "copyOplogRefsRange " << b << endl;
-            writeEntryToOplogRefs(b);
+        }
+        catch (DBException e) {
+            // this behavior of trying 5 times, and then
+            // trying another 5 times with a sleep
+            // in the middle is completely arbitrary
+            if (numConsecutiveFailed > 10) {
+                throw e;
+            }
+            if (numConsecutiveFailed > 5) {
+                sleepsecs(1);
+            }
         }
     }
 

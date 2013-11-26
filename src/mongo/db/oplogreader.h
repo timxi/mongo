@@ -109,7 +109,7 @@ namespace mongo {
         BSONObj nextSafe() { return cursor->nextSafe(); }
         BSONObj next() { return cursor->next(); }
 
-        shared_ptr<DBClientCursor> getOplogRefsCursor(OID &oid);
+        shared_ptr<DBClientCursor> getOplogRefsCursor(OID &oid, uint64_t seq);
 
     private:
         /** @return true iff connection was successful */ 

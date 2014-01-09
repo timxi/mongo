@@ -22,6 +22,7 @@
 
 #include "mongo/db/client.h"
 #include "mongo/bson/util/atomic_int.h"
+#include "mongo/util/background.h"
 #include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/net/hostandport.h"
@@ -249,11 +250,20 @@ namespace mongo {
         ProgressMeter _progressMeter;
         volatile bool _killed;
         LockStat _lockStat;
+        int _tid;
         
         // this is how much "extra" time a query might take
         // a writebacklisten for example will block for 30s 
         // so this should be 30000 in that case
         long long _expectedLatencyMs; 
                                      
+    };
+
+    class CurOpMonitor : public BackgroundJob {
+    public:
+        string name() const { return "CurOpMonitor"; }
+        void run();
+
+        static void start();
     };
 }

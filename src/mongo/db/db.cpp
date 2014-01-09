@@ -366,6 +366,11 @@ namespace mongo {
         snapshotThread.go();
         d.clientCursorMonitor.go();
         PeriodicTask::theRunner->go();
+#define CUROP_MONITOR
+#ifdef CUROP_MONITOR
+        // only meant for development
+        CurOpMonitor::start();
+#endif
         if (missingRepl) {
             // a warning was logged earlier
         }

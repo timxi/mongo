@@ -46,6 +46,7 @@
 #include "mongo/db/replutil.h"
 #include "mongo/db/relock.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/command_cursors.h"
 #include "mongo/db/commands/rename_collection.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/instance.h"
@@ -498,6 +499,32 @@ namespace mongo {
         }
     } cmdEngineStatus;
 
+    /**
+     * VectorCursor is a Cursor that returns results out of a pre-populated
+     * vector<BSONObj> rather than from a query.  It should be used for
+     * informational data which is usually not too large (since it stays in
+     * memory until exhausted), but which sometimes could be too large for a
+     * BSONArray, and therefore would be better served by having the option of a
+     * cursor.
+     */
+    class VectorCursor : public Cursor {
+        shared_ptr<vector<BSONObj> > _vec;
+        vector<BSONObj>::const_iterator _it;
+
+      public:
+        VectorCursor(const shared_ptr<vector<BSONObj> > &vec) : _vec(vec), _it(_vec->begin()) {}
+        virtual bool ok() { return _it != _vec->end(); }
+        virtual bool advance() { _it++; return ok(); }
+        virtual BSONObj current() { return *_it; }
+        virtual bool shouldDestroyOnNSDeletion() { return false; }
+        virtual bool getsetdup(const BSONObj &pk) { return false; }
+        virtual bool isMultiKey() const { return false; }
+        virtual bool modifiedKeys() const { return false; }
+        virtual string toString() const { return "Vector_Cursor"; }
+        virtual long long nscanned() const { return 0; }
+        virtual void explainDetails(BSONObjBuilder &) const {}
+    };
+
     class CmdShowPendingLockRequests : public WebInformationCommand {
     public:
         CmdShowPendingLockRequests() : WebInformationCommand("showPendingLockRequests") {}
@@ -514,7 +541,35 @@ namespace mongo {
         }
 
         bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            storage::get_pending_lock_request_status(result);
+            shared_ptr<vector<BSONObj> > pendingLockRequests(new vector<BSONObj>);
+            storage::get_pending_lock_request_status(*pendingLockRequests);
+
+            if (!isCursorCommand(cmdObj)) {
+                // old api
+                BSONArrayBuilder ab(result.subarrayStart("requests"));
+                for (vector<BSONObj>::const_iterator it = pendingLockRequests->begin(); it != pendingLockRequests->end(); ++it) {
+                    if (ab.len() + it->objsize() > BSONObjMaxUserSize - 1024) {
+                        ab.append("too many results to return");
+                        break;
+                    }
+                    ab.append(*it);
+                }
+                return true;
+            }
+
+            CursorId id;
+            {
+                // Set up cursor
+                LOCK_REASON(lockReason, "showPendingLockRequests: creating cursor");
+                Client::ReadContext ctx(dbname, lockReason);
+                shared_ptr<Cursor> cursor(new VectorCursor(pendingLockRequests));
+                // cc will be owned by cursor manager
+                ClientCursor *cc = new ClientCursor(0, cursor, dbname, cmdObj.getOwned());
+                id = cc->cursorid();
+            }
+
+            handleCursorCommand(id, cmdObj, result);
+
             return true;
         }
     } cmdShowPendingLockRequests;
@@ -535,7 +590,35 @@ namespace mongo {
         }
 
         bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            storage::get_live_transaction_status(result);
+            shared_ptr<vector<BSONObj> > liveTransactions(new vector<BSONObj>);
+            storage::get_live_transaction_status(*liveTransactions);
+
+            if (!isCursorCommand(cmdObj)) {
+                // old api
+                BSONArrayBuilder ab(result.subarrayStart("transactions"));
+                for (vector<BSONObj>::const_iterator it = liveTransactions->begin(); it != liveTransactions->end(); ++it) {
+                    if (ab.len() + it->objsize() > BSONObjMaxUserSize - 1024) {
+                        ab.append("too many results to return");
+                        break;
+                    }
+                    ab.append(*it);
+                }
+                return true;
+            }
+
+            CursorId id;
+            {
+                // Set up cursor
+                LOCK_REASON(lockReason, "showLiveTransactions: creating cursor");
+                Client::ReadContext ctx(dbname, lockReason);
+                shared_ptr<Cursor> cursor(new VectorCursor(liveTransactions));
+                // cc will be owned by cursor manager
+                ClientCursor *cc = new ClientCursor(0, cursor, dbname, cmdObj.getOwned());
+                id = cc->cursorid();
+            }
+
+            handleCursorCommand(id, cmdObj, result);
+
             return true;
         }
     } cmdShowLiveTransactions;
@@ -1351,7 +1434,7 @@ namespace mongo {
                 return false;
             }
 
-            Collection::Stats aggStats;
+            CollectionData::Stats aggStats;
             cl->fillCollectionStats(aggStats, &result, scale);
 
             return true;
@@ -1394,7 +1477,7 @@ namespace mongo {
             }
 
             uint64_t ncollections = 0;
-            Collection::Stats aggStats;
+            CollectionData::Stats aggStats;
 
             for (list<string>::const_iterator it = collections.begin(); it != collections.end(); ++it) {
                 const string ns = *it;
@@ -1674,7 +1757,7 @@ namespace mongo {
             string ns = dbname + "." + coll;
             BSONElement force = cmdObj["force"];
             bool isOplogNS = (strcmp(ns.c_str(), rsoplog) == 0) || (strcmp(ns.c_str(), rsOplogRefs) == 0);
-            uassert( 17300, "cannot manually drop partition on oplog or oplog.refs", force.ok() || !isOplogNS);
+            uassert( 17300, "cannot manually drop partition on oplog or oplog.refs", force.trueValue() || !isOplogNS);
             Collection *cl = getCollection( ns );
             OpLogHelpers::logUnsupportedOperation(ns.c_str());
             uassert( 17301, "dropPartition no such collection", cl );
@@ -1713,7 +1796,7 @@ namespace mongo {
             string ns = dbname + "." + coll;
             BSONElement force = cmdObj["force"];
             bool isOplogNS = (strcmp(ns.c_str(), rsoplog) == 0) || (strcmp(ns.c_str(), rsOplogRefs) == 0);
-            uassert( 17305, "cannot manually add partition on oplog or oplog.refs", force.ok() || !isOplogNS);
+            uassert( 17305, "cannot manually add partition on oplog or oplog.refs", force.trueValue() || !isOplogNS);
             Collection *cl = getCollection( ns );
             uassert( 17306, "addPartition no such collection", cl );
             uassert( 17307, "collection must be partitioned", cl->isPartitioned() );

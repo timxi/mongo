@@ -113,7 +113,6 @@ if (BUILD_TESTING)
       base
       ${TOKUMX_SSL_LIBRARIES}
       )
-    add_test(mongo/s/${test} ${test})
   endforeach ()
 
   target_link_libraries(mongo_version_range_test bson)
@@ -139,7 +138,6 @@ if (BUILD_TESTING)
       base
       ${TOKUMX_SSL_LIBRARIES}
       )
-    add_test(mongo/s/${test} ${test})
   endforeach ()
   foreach (test
       balancer_policy_tests
@@ -148,6 +146,7 @@ if (BUILD_TESTING)
       )
     target_link_whole_libraries(${test}
       mongoscore
+      authservercommon
       coreshard
       coreserver
       coredb

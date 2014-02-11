@@ -14,6 +14,7 @@ target_link_libraries(server_parameters foundation bson)
 add_library(index_set STATIC
   index_set
   )
+add_dependencies(index_set generate_error_codes generate_action_types)
 
 add_library(dbcmdline STATIC
   cmdline
@@ -168,6 +169,7 @@ add_library(serveronly STATIC
 
   # most commands are only for mongod
   dbcommands
+  command_cursors
   commands/dbcommands_deprecated
   commands/fsync
   commands/distinct
@@ -248,7 +250,6 @@ if (BUILD_TESTING)
       base
       ${TOKUMX_SSL_LIBRARIES}
       )
-    add_test(mongo/db/${test} ${test})
   endforeach ()
 
   target_link_libraries(cmdline_test dbcmdline)

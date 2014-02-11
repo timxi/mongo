@@ -57,6 +57,7 @@
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/ops/delete.h"
+#include "mongo/db/server_parameters.h"
 
 #include "mongo/client/connpool.h"
 #include "mongo/client/distlock.h"
@@ -85,6 +86,8 @@
 using namespace std;
 
 namespace mongo {
+
+    MONGO_EXPORT_SERVER_PARAMETER(migrateUniqueChecks, bool, true);
 
     bool findShardKeyIndexPattern_locked( const string& ns,
                                           const BSONObj& shardKeyPattern,
@@ -333,17 +336,13 @@ namespace mongo {
                     << "a capped collection is being sharded, this should not happen"
                     << " ns: " << ns
                     << " opstr: " << opstr,
-                    !(mongoutils::str::equals(opstr, OpLogHelpers::OP_STR_CAPPED_INSERT) ||
-                      mongoutils::str::equals(opstr, OpLogHelpers::OP_STR_CAPPED_DELETE)));
+                    !OpLogHelpers::invalidOpForSharding(opstr));
 
             if (!_snapshotTaken) {
                 return false;
             }
 
-            if (mongoutils::str::equals(opstr, OpLogHelpers::OP_STR_INSERT) ||
-                mongoutils::str::equals(opstr, OpLogHelpers::OP_STR_DELETE) ||
-                mongoutils::str::equals(opstr, OpLogHelpers::OP_STR_UPDATE) ||
-                mongoutils::str::equals(opstr, OpLogHelpers::OP_STR_UPDATE_MODS)) {
+            if (OpLogHelpers::shouldLogOpForSharding(opstr)) {
                 return isInRange(obj, _min, _max, _shardKeyPattern);
             }
             return false;
@@ -1660,17 +1659,21 @@ namespace mongo {
                     massert(17225, mongoutils::str::stream() << "expected cursor ns " << ns << ", got " << cursorObj["ns"].Stringdata(),
                             cursorObj["ns"].Stringdata() == ns);
 
+                    uint64_t insertFlags = Collection::NO_LOCKTREE;
+                    if (!migrateUniqueChecks) {
+                        insertFlags |= Collection::NO_UNIQUE_CHECKS;
+                    }
+
                     LOCK_REASON(lockReason, "sharding: cloning documents on recipient for migrate");
                     {
                         Client::ReadContext ctx(ns, lockReason);
                         Client::Transaction txn(DB_SERIALIZABLE);
+                        Collection *cl = getCollection(ns);
+                        massert(17318, "collection must exist during migration", cl);
                         for (BSONObjIterator it(cursorObj["firstBatch"].Obj()); it.more(); ++it) {
                             BSONObj obj = (*it).Obj();
-                            updateObjects(ns.c_str(), obj, obj["_id"].wrap(),
-                                          true,   // upsert
-                                          false,  // multi
-                                          true,   // logop
-                                          true);  // fromMigrate
+                            insertOneObject(cl, obj, insertFlags);
+                            OpLogHelpers::logInsert(ns.c_str(), obj, true);
                             numCloned++;
                             clonedBytes += obj.objsize();
                         }
@@ -1681,13 +1684,12 @@ namespace mongo {
                          cursor.more(); ) {
                         Client::ReadContext ctx(ns, lockReason);
                         Client::Transaction txn(DB_SERIALIZABLE);
+                        Collection *cl = getCollection(ns);
+                        massert(17319, "collection must exist during migration", cl);
                         while (cursor.moreInCurrentBatch()) {
                             BSONObj obj = cursor.nextSafe();
-                            updateObjects(ns.c_str(), obj, obj["_id"].wrap(),
-                                          true,   // upsert
-                                          false,  // multi
-                                          true,   // logop
-                                          true);  // fromMigrate
+                            insertOneObject(cl, obj, insertFlags);
+                            OpLogHelpers::logInsert(ns.c_str(), obj, true);
                             numCloned++;
                             clonedBytes += obj.objsize();
                         }
@@ -1982,7 +1984,7 @@ namespace mongo {
     public:
         RecvChunkStartCommand() : ChunkCommandHelper( "_recvChunkStart" ) {}
 
-        virtual LockType locktype() const { return WRITE; }  // this is so don't have to do locking internally
+        virtual LockType locktype() const { return OPLOCK; }
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
@@ -1990,7 +1992,7 @@ namespace mongo {
             actions.addAction(ActionType::_recvChunkStart);
             out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
         }
-        bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
+        bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
 
             if ( migrateStatus.getActive() ) {
                 errmsg = "migrate already in progress";
@@ -1999,6 +2001,12 @@ namespace mongo {
             
             if ( ! configServer.ok() )
                 ShardingState::initialize(cmdObj["configServer"].String());
+
+            // This used to be over the entire _recvChunkStart command, but
+            // ShardingState::initialize will take a GlobalWrite lock in order to enable sharding,
+            // so we can't take the lock until after that.
+            LOCK_REASON(lockReason, "sharding: _recvChunkStart");
+            Lock::DBWrite lk(dbname, lockReason);
 
             migrateStatus.prepare();
 

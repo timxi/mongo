@@ -96,13 +96,13 @@ if (BUILD_TESTING)
       mongocommon
       mongodandmongos
       mongoscore
+      authservercommon
       base
       )
     target_link_libraries(${test}
       ${TokuKV_LIBRARIES}
       ${TOKUMX_SSL_LIBRARIES}
       )
-    add_test(mongo/client/${test} ${test})
   endforeach ()
   target_link_libraries(dbclient_rs_test
     mocklib

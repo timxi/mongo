@@ -30,6 +30,7 @@ endif ()
 target_link_whole_libraries(smokeTest
   mongocommon
   serveronly
+  authservercommon
   coreserver
   coredb
   )
@@ -47,4 +48,3 @@ target_link_libraries(smokeTest
   ${TokuKV_LIBRARIES}
   ${TOKUMX_SSL_LIBRARIES}
   )
-add_test(mongo/dbtests/smokeTest smokeTest)

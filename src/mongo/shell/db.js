@@ -339,6 +339,8 @@ DB.prototype.createCollection = function(name, opt) {
         cmd.pageSize = options.pageSize;
     if (options.readPageSize != undefined)
         cmd.readPageSize = options.readPageSize;
+    if (options.primaryKey != undefined)
+        cmd.primaryKey = options.primaryKey;
     if (options.fanout != undefined)
         cmd.fanout = options.fanout;
     var res = this._dbCommand(cmd);
@@ -992,12 +994,24 @@ DB.prototype.rollbackTransaction = function(){
     return this.runCommand('rollbackTransaction');
 }
 
+DB.prototype._runCommandCursor = function(cmd) {
+    if (typeof(cmd) == "string") {
+        var obj = {};
+        obj[cmd] = 1;
+        cmd = obj;
+    }
+    cmd.cursor = cmd.cursor || {};
+    var res = this.runCommand(cmd);
+    assert.commandWorked(res, tojson(cmd) + ' with cursor failed');
+    return new DBCommandCursor(this._mongo, res);
+}
+
 DB.prototype.showLiveTransactions = function(){
-    return this.runCommand('showLiveTransactions');
+    return this._runCommandCursor('showLiveTransactions');
 }
 
 DB.prototype.showPendingLockRequests = function(){
-    return this.runCommand('showPendingLockRequests');
+    return this._runCommandCursor('showPendingLockRequests');
 }
 
 DB.prototype.serverBuildInfo = function(){

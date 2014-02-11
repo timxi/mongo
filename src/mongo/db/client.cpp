@@ -87,6 +87,13 @@ namespace mongo {
         cc()._upgradingSystemUsers = false;
     }
 
+    Client::UpgradingDiskFormatVersionScope::UpgradingDiskFormatVersionScope() {
+        cc()._upgradingDiskFormatVersion = true;
+    }
+    Client::UpgradingDiskFormatVersionScope::~UpgradingDiskFormatVersionScope() {
+        cc()._upgradingDiskFormatVersion = false;
+    }
+
     /* each thread which does db operations has a Client object in TLS.
        call this when your thread starts.
     */
@@ -108,6 +115,7 @@ namespace mongo {
         _god(0),
         _creatingSystemUsers(""),
         _upgradingSystemUsers(false),
+        _upgradingDiskFormatVersion(false),
         _globallyUninterruptible(false)
     {
         _connectionId = p ? p->connectionId() : 0;
@@ -469,7 +477,6 @@ namespace mongo {
         nupdated = -1;
         ninserted = -1;
         ndeleted = -1;
-        fastmod = false;
         fastmodinsert = false;
         upsert = false;
         keyUpdates = 0;  // unsigned, so -1 not possible
@@ -530,7 +537,6 @@ namespace mongo {
         OPDEBUG_TOSTRING_HELP( nupdated );
         OPDEBUG_TOSTRING_HELP( ninserted );
         OPDEBUG_TOSTRING_HELP( ndeleted );
-        OPDEBUG_TOSTRING_HELP_BOOL( fastmod );
         OPDEBUG_TOSTRING_HELP_BOOL( fastmodinsert );
         OPDEBUG_TOSTRING_HELP_BOOL( upsert );
         OPDEBUG_TOSTRING_HELP( keyUpdates );
@@ -545,8 +551,23 @@ namespace mongo {
         }
 
 
-        if ( ! lockNotGrantedInfo.isEmpty() ) {
-            s << " lockNotGranted: " << lockNotGrantedInfo;
+        if (!lockNotGrantedInfo.isEmpty()) {
+            BSONObjBuilder expandedLockNotGrantedInfoBuilder;
+            expandedLockNotGrantedInfoBuilder.appendElements(lockNotGrantedInfo);
+            verify(lockNotGrantedInfo["blockingTxnid"].isNumber());
+            long long blockingTxnid = lockNotGrantedInfo["blockingTxnid"].numberLong();
+            {
+                scoped_lock bl(Client::clientsMutex);
+                for (set<Client*>::iterator i = Client::clients.begin(); i != Client::clients.end(); i++) {
+                    Client *c = *i;
+                    verify(c);
+                    if (c->rootTransactionId() == blockingTxnid && c->curop() != NULL) {
+                        expandedLockNotGrantedInfoBuilder.append("blockingOp", c->curop()->info());
+                        break;
+                    }
+                }
+            }
+            s << " lockNotGranted: " << expandedLockNotGrantedInfoBuilder.done();
         }
 
         s << " ";
@@ -584,7 +605,6 @@ namespace mongo {
         OPDEBUG_APPEND_NUMBER( nupdated );
         OPDEBUG_APPEND_NUMBER( ninserted );
         OPDEBUG_APPEND_NUMBER( ndeleted );
-        OPDEBUG_APPEND_BOOL( fastmod );
         OPDEBUG_APPEND_BOOL( fastmodinsert );
         OPDEBUG_APPEND_BOOL( upsert );
         OPDEBUG_APPEND_NUMBER( keyUpdates );

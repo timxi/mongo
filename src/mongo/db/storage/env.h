@@ -31,9 +31,6 @@ namespace mongo {
         class UpdateCallback : boost::noncopyable {
         public:
             virtual ~UpdateCallback() { }
-            virtual BSONObj upsert(const BSONObj &pk, const BSONObj &msg) {
-                msgasserted(17216, "bug: update upsert callback not properly installed");
-            }
             virtual BSONObj applyMods(const BSONObj &oldObj, const BSONObj &msg) {
                 msgasserted(17214, "bug: update apply callback not properly installed");
             }
@@ -48,8 +45,8 @@ namespace mongo {
         void db_rename(const string &old_name, const string &new_name);
 
         void get_status(BSONObjBuilder &status);
-        void get_pending_lock_request_status(BSONObjBuilder &status);
-        void get_live_transaction_status(BSONObjBuilder &status);
+        void get_pending_lock_request_status(vector<BSONObj> &pendingLockRequests);
+        void get_live_transaction_status(vector<BSONObj> &liveTransactions);
         void log_flush();
         void checkpoint();
 

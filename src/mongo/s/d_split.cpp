@@ -83,6 +83,12 @@ namespace mongo {
         bool run(const string& dbname, BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
 
             const char* ns = jsobj.getStringField( "checkShardingIndex" );
+
+            if (nsToDatabaseSubstring(ns) != dbname) {
+                errmsg = "incorrect database in ns";
+                return false;
+            }
+
             BSONObj keyPattern = jsobj.getObjectField( "keyPattern" );
 
             if ( keyPattern.isEmpty() ) {
@@ -497,7 +503,7 @@ namespace mongo {
                 finder.find(maxChunkSize, maxSplitPoints);
             } else {
                 // Haven't implemented a better version using get_key_after_bytes yet, do the slow thing
-                Collection::Stats stats;
+                CollectionData::Stats stats;
                 cl->fillCollectionStats(stats, NULL, 1);
                 const long long recCount = stats.count;
                 const long long dataSize = stats.size;

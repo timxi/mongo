@@ -248,6 +248,7 @@ include_directories(
 if (JS_ENGINE STREQUAL v8)
   include_directories(${V8_INCLUDE_DIRS})
 endif ()
+
 add_subdirectory(src/mongo)
 
 add_subdirectory(distsrc)
@@ -265,6 +266,8 @@ install(FILES src/SConscript.client
   COMPONENT tokumx_client_misc
   DESTINATION src
   )
+
+add_subdirectory(jstests)
 
 file(READ src/mongo/util/version.cpp version_cpp_contents)
 string(REGEX MATCH "const char tokumxVersionString\\[\\] = \"(([0-9]+)\\.([0-9]+)\\.([0-9]+)([^\"]*))\"\\;" unused "${version_cpp_contents}")

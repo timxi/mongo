@@ -940,5 +940,4 @@ namespace mongo {
     { return BSON( "$or" << BSON_ARRAY(a << b << c << d << e) ); }
     inline BSONObj OR(const BSONObj& a, const BSONObj& b, const BSONObj& c, const BSONObj& d, const BSONObj& e, const BSONObj& f)
     { return BSON( "$or" << BSON_ARRAY(a << b << c << d << e << f) ); }
-
 }

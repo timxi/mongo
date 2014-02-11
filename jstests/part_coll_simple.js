@@ -1,4 +1,4 @@
-// Test that simple operations on a partitioned collection work
+7// Test that simple operations on a partitioned collection work
 // This verifies that a partitioned collection with just a single partition
 // works as expected
 
@@ -14,7 +14,7 @@ assert.commandFailed(db.runCommand({ create: 'part_coll_simple', partitioned:1, 
 assert.commandWorked(db.runCommand({ create: 'part_coll_simple', partitioned:1}));
 assert.commandFailed(db.part_coll_simple.renameCollection("abra"));
 admin = db.getMongo().getDB( "admin" );
-assert.commandFailed( admin.runCommand( {renameCollection:"test.part_coll_simple", to:"abra.abra"} ) );
+assert.commandFailed( admin.runCommand( {renameCollection:db.getName() + ".part_coll_simple", to:"abra.abra"} ) );
 // verify that we cannot add an index
 x = t.ensureIndex({a:1});
 assert.eq(x.code, 17238);
@@ -24,7 +24,7 @@ assert.eq(x.code, 17242);
 // verify that we can drop and recreate
 t.drop();
 assert.commandWorked(db.runCommand({ create: 'part_coll_simple', partitioned:1}));
-assert.commandFailed(t.reIndex());
+assert.commandWorked(t.reIndex());
 
 function doWritesTest() {
     // insert some data
@@ -52,6 +52,16 @@ function doWritesTest() {
         assert.eq(x.b, 2*i);
     }
 
+    for (i = 0; i < 1000; i++) {
+        t.update({_id:i}, {$set : { b :3*i}});
+    }
+    assert.eq(1000, t.count());
+    for (i = 0; i < 1000; i++) {
+        x = t.find({_id:i}).next();
+        assert.eq(x._id, i);
+        assert.eq(x.b, 3*i);
+    }
+
     // "fast" update some data (which is disabled)
     for (i = 0; i < 1000; i++) {
         t.update({_id:i}, {$inc : {b : 1}});
@@ -60,7 +70,7 @@ function doWritesTest() {
     for (i = 0; i < 1000; i++) {
         x = t.find({_id:i}).next();
         assert.eq(x._id, i);
-        assert.eq(x.b, 2*i + 1);
+        assert.eq(x.b, 3*i + 1);
     }
 
     // delete all data
@@ -73,7 +83,7 @@ function doWritesTest() {
     for (i = 500; i < 1000; i++) {
         x = t.find({_id:i}).next();
         assert.eq(x._id, i);
-        assert.eq(x.b, 2*i + 1);
+        assert.eq(x.b, 3*i + 1);
     }
 }
 function doQueriesTest() {

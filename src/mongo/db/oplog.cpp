@@ -555,11 +555,7 @@ namespace mongo {
         BSONObj refMeta = pc->getPartitionMetadata(refNum-2);
 
         BSONObjBuilder b;
-        BSONObjIterator i( refMeta );
-        while ( i.more() ) {
-            BSONElement e = i.next();
-            b.append( e );
-        }
+        b.appendElements(refMeta);
         addGTIDToBSON("maxRefGTID", pivot, b);
         pc->updatePartitionMetadata(refNum-2, b.done());
     }

@@ -332,6 +332,7 @@ namespace mongo {
 
     void PartitionedCursor::initializeSubCursor() {
         _currPartition = _startPartition;
+        log () << "initializeSubCursor, start: " << _startPartition << " end: " << _endPartition << " curr: " << _currPartition << endl;
         makeSubCursor(_currPartition);
         while (!_currentCursor->ok() && _currPartition != _endPartition) {
             getNextSubCursor();

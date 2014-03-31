@@ -2884,7 +2884,7 @@ namespace mongo {
             subPartitionIDGenerator.reset(new FilteredPartitionIDGeneratorImpl(this, _ns.c_str(), _shardKeyPattern, direction));
         }
         shared_ptr<Cursor> ret;
-        if (!isPK && cc().querySettings().sortRequired()) {
+        if (!isPK && cc().querySettings().sortRequired() && !subPartitionIDGenerator->lastIndex()) {
             ret.reset(new SortedPartitionedCursor(
                 idx.keyPattern(),
                 direction,
@@ -2927,7 +2927,7 @@ namespace mongo {
             subPartitionIDGenerator.reset(new FilteredPartitionIDGeneratorImpl(this, _ns.c_str(), _shardKeyPattern, direction));
         }
         shared_ptr<Cursor> ret;
-        if (!isPK && cc().querySettings().sortRequired()) {
+        if (!isPK && cc().querySettings().sortRequired() && !subPartitionIDGenerator->lastIndex()) {
             ret.reset(new SortedPartitionedCursor(
                 idx.keyPattern(),
                 direction,
@@ -2970,7 +2970,7 @@ namespace mongo {
         }
 
         shared_ptr<Cursor> ret;
-        if (!isPK && cc().querySettings().sortRequired()) {
+        if (!isPK && cc().querySettings().sortRequired() && !subPartitionIDGenerator->lastIndex()) {
             ret.reset(new SortedPartitionedCursor(
                 idx.keyPattern(),
                 direction,

@@ -702,20 +702,18 @@ namespace mongo {
         }
 
         virtual bool getsetdup(const BSONObj &pk) {
-            // Partitioned Collections cannot have multikey indexes
-            // as of now
-            verify(!isMultiKey());
+            if ( _multiKey ) {
+                return _dups.getsetdup(pk);
+            }
             return false;
         }
 
         virtual bool isMultiKey() const {
-            // TODO: make sure constructors verify this
-            return false;
+            return _multiKey;
         }
 
         virtual bool modifiedKeys() const {
-            verify(!isMultiKey());
-            return false;
+            return _multiKey;
         }
 
         virtual BSONObj prettyIndexBounds() const {
@@ -752,14 +750,16 @@ namespace mongo {
         PartitionedCursor(
             const bool distributed,
             shared_ptr<SubPartitionCursorGenerator> subCursorGenerator,
-            shared_ptr<SubPartitionIDGenerator> subPartitionIDGenerator
+            shared_ptr<SubPartitionIDGenerator> subPartitionIDGenerator,
+            const bool multiKey
             );
         void getNextSubCursor();
         void initializeSubCursor();
 
+        const bool _distributed;
         shared_ptr<SubPartitionCursorGenerator> _subCursorGenerator;
         shared_ptr<SubPartitionIDGenerator> _subPartitionIDGenerator;
-        const bool _distributed;
+        const bool _multiKey;
         // cursor currently being used to retrieve documents
         shared_ptr<Cursor> _currentCursor;
         // number of documents scanned
@@ -813,20 +813,18 @@ namespace mongo {
         }
 
         virtual bool getsetdup(const BSONObj &pk) {
-            // Partitioned Collections cannot have multikey indexes
-            // as of now
-            verify(!isMultiKey());
+            if ( _multiKey ) {
+                return _dups.getsetdup(pk);
+            }
             return false;
         }
 
         virtual bool isMultiKey() const {
-            // TODO: make sure constructors verify this
-            return false;
+            return _multiKey;
         }
 
         virtual bool modifiedKeys() const {
-            verify(!isMultiKey());
-            return false;
+            return _multiKey;
         }
 
         virtual BSONObj prettyIndexBounds() const {
@@ -874,13 +872,14 @@ namespace mongo {
             const BSONObj idxPattern,
             const int direction,
             shared_ptr<SubPartitionCursorGenerator> subCursorGenerator,
-            shared_ptr<SubPartitionIDGenerator> subPartitionIDGenerator
+            shared_ptr<SubPartitionIDGenerator> subPartitionIDGenerator,
+            const bool multiKey
             );
         const int _direction;
         const Ordering _ordering;
         shared_ptr<SubPartitionCursorGenerator> _subCursorGenerator;
         shared_ptr<SubPartitionIDGenerator> _subPartitionIDGenerator;
-
+        const bool _multiKey;
 
         // number of documents scanned
         // by previous cursors

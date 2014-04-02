@@ -41,6 +41,7 @@
 #include "mongo/db/database.h"
 #include "mongo/db/collection.h"
 #include "mongo/db/storage/exception.h"
+#include "mongo/util/progress_meter.h"
 
 namespace mongo {
 
@@ -189,20 +190,10 @@ namespace mongo {
     }
 
     struct Cloner::Fun {
-        Fun() : lastLog(0) { }
-        time_t lastLog;
         void operator()(DBClientCursorBatchIterator &i) {
             const string to_dbname = nsToDatabase(to_collection);
             while (i.moreInCurrentBatch()) {
                 if (n % 128 == 127) {
-                    time_t now = time(0);
-                    if (now - lastLog >= 60) { 
-                        // report progress
-                        if (lastLog) {
-                            log() << "clone " << to_collection << ' ' << n << endl;
-                        }
-                        lastLog = now;
-                    }
                     mayInterrupt(_mayBeInterrupted);
                 }
 
@@ -244,15 +235,15 @@ namespace mongo {
                         else {
                             insertObject(to_collection, js, 0, logForRepl);
                         }
+                        if (progress == NULL) {
+                            RATELIMITED(3000) LOG(0) << "Cloning collection " << from_collection << " progress " << n << endl;
+                        } else if (progress->hit(js.objsize()) && cc().curop()) {
+                            cc().curop()->setMessage(progress->toString());
+                        }
                     }
                     catch (UserException& e) {
                         error() << "error: exception cloning object in " << from_collection << ' ' << e.what() << " obj:" << js.toString() << '\n';
                         throw;
-                    }
-
-                    RARELY if ( time( 0 ) - saveLast > 60 ) {
-                        log() << n << " objects cloned so far from collection " << from_collection << endl;
-                        saveLast = time( 0 );
                     }
                 }
             }
@@ -261,11 +252,11 @@ namespace mongo {
         bool isindex;
         const char *from_collection;
         const char *to_collection;
-        time_t saveLast;
         list<BSONObj> *storedForLater;
         bool logForRepl;
         bool _mayBeInterrupted;
         bool _isCapped;
+        ProgressMeter *progress;
     };
 
     /* copy the specified collection
@@ -286,16 +277,34 @@ namespace mongo {
 
         LOG(2) << "\t\tcloning collection " << from_collection << " to " << to_collection << " on " << conn->getServerAddress() << " with filter " << query.toString() << endl;
 
+        BSONObj res;
+        bool ok = conn->runCommand(nsToDatabase(from_collection), BSON("collStats" << nsToCollectionSubstring(from_collection)), res);
+        scoped_ptr<ProgressMeter> dataProgress;
+        if (ok && res["size"].isNumber()) {
+            dataProgress.reset(new ProgressMeter(res["size"].numberLong(), 3, 1<<12, "bytes"));
+            if (logForRepl) {
+                std::stringstream ss;
+                ss << "Copying data from " << from_collection;
+                dataProgress->setName(ss.str());
+            } else {
+                std::stringstream ss;
+                ss << "Initial sync copying data from " << from_collection;
+                dataProgress->setName(ss.str());
+            }
+        } else {
+            warning() << "Could not estimate size of " << from_collection << "." << endl;
+        }
+
         Fun f;
         f.n = 0;
         f.isindex = isindex;
         f.from_collection = from_collection;
         f.to_collection = to_collection;
-        f.saveLast = time( 0 );
         f.storedForLater = &storedForLater;
         f.logForRepl = logForRepl;
         f._mayBeInterrupted = mayBeInterrupted;
         f._isCapped = isCapped;
+        f.progress = dataProgress.get();
 
         int options = QueryOption_NoCursorTimeout | QueryOption_AddHiddenPK |
             ( slaveOk ? QueryOption_SlaveOk : 0 );
@@ -303,18 +312,35 @@ namespace mongo {
         mayInterrupt( mayBeInterrupted );
         conn->query(boost::function<void(DBClientCursorBatchIterator &)>(f), from_collection, query, 0, options);
 
+        if (dataProgress) {
+            dataProgress->finished();
+        }
+
+        ProgressMeter indexesProgress(storedForLater.size(), 3, 1, "indexes");
+        if (logForRepl) {
+            indexesProgress.setName("Building indexes for clone");
+        } else {
+            indexesProgress.setName("Initial sync building indexes");
+        }
+
         for ( list<BSONObj>::iterator i = storedForLater.begin(); i!=storedForLater.end(); i++ ) {
             BSONObj js = *i;
             try {
                 LOCK_REASON(lockReason, "cloner: creating indexes");
                 Client::WriteContext ctx(js.getStringField("ns"), lockReason);
                 insertObject(to_collection, js, 0, logForRepl);
+                if (indexesProgress.hit() && cc().curop()) {
+                    std::string status = indexesProgress.toString();
+                    cc().curop()->setMessage(status.c_str());
+                }
             }
             catch( UserException& e ) {
                 error() << "error: exception cloning object in " << from_collection << ' ' << e.what() << " obj:" << js.toString() << '\n';
                 throw;
             }
         }
+
+        indexesProgress.done();
     }
 
     void Cloner::copyCollectionData(
@@ -524,6 +550,17 @@ namespace mongo {
             }
         }
 
+        ProgressMeter collsProgress(toClone.size(), 3, 1, "collections");
+        if (opts.logForRepl) {
+            std::stringstream ss;
+            ss << "Copying db " << todb << " progress";
+            collsProgress.setName(ss.str());
+        } else {
+            std::stringstream ss;
+            ss << "Initial sync cloning db " << todb << " progress";
+            collsProgress.setName(ss.str());
+        }
+
         for ( list<BSONObj>::iterator i=toClone.begin(); i != toClone.end(); i++ ) {
             mayInterrupt( opts.mayBeInterrupted );
             if (!checkCollectionsExist(*conn, opts.fromDB, toCloneNames, errmsg)) {
@@ -574,12 +611,18 @@ namespace mongo {
                 isCapped,
                 q
                 );
+            if (collsProgress.hit() && cc().curop()) {
+                std::string status = collsProgress.toString();
+                cc().curop()->setMessage(status.c_str());
+            }
         }
 
         // check that they still exists before syncing indexes
         if (!checkCollectionsExist(*conn, opts.fromDB, toCloneNames, errmsg)) {
             return false;
         }
+
+        collsProgress.finished();
 
         // now build the indexes
         

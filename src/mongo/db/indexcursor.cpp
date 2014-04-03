@@ -247,7 +247,7 @@ namespace mongo {
     bool IndexCursor::cursor_check_interrupt(void* extra) {
         struct cursor_interrupt_extra *info = static_cast<struct cursor_interrupt_extra *>(extra);
         try {
-            killCurrentOp.checkForInterrupt(info->c); // uasserts if we should stop
+            killCurrentOp.checkForInterrupt(); // uasserts if we should stop
         } catch (const std::exception &ex) {
             info->saveException(ex);
             return true;

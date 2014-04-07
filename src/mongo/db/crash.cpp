@@ -314,9 +314,10 @@ namespace mongo {
             struct statfs st;
             int r = statfs(path, &st);
             if (r != 0) {
+                int eno = errno;
                 p = buf;
                 p = stpcpy(p, "Error looking up filesystem information: ");
-                p = stpcpy(p, strerror(errno));
+                p = stpcpy(p, strerror(eno));
                 rawOut(buf);
                 return;
             }

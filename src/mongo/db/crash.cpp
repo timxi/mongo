@@ -20,6 +20,12 @@
 
 #include <string.h>
 
+#if MONGO_HAVE_HEADER_LIMITS_H
+  #include <limits.h>
+#endif
+#if MONGO_HAVE_HEADER_UNISTD_H
+  #include <unistd.h>
+#endif
 #if MONGO_HAVE_HEADER_SYS_RESOURCE_H
   #include <sys/resource.h>
 #endif
@@ -214,6 +220,23 @@ namespace mongo {
         }
 #endif
 
+        static void printSysconf(int var, const char *name) {
+            char buf[1<<12];
+            long val = sysconf(var);
+            if (val == -1) {
+                int eno = errno;
+                char *p = buf;
+                p = stpcpy(p, "Error getting ");
+                p = stpcpy(p, name);
+                p = stpcpy(p, ": ");
+                p = stpcpy(p, strerror(eno));
+                rawOut(buf);
+                return;
+            }
+            snprintf(buf, sizeof buf, "%s: %ld", name, val);
+            rawOut(buf);
+        }
+
         static void processInfo() {
             rawOut("--------------------------------------------------------------------------------");
             rawOut("Process info:");
@@ -239,6 +262,26 @@ namespace mongo {
             printResourceLimit(RLIMIT_NOFILE, "RLIMIT_NOFILE");
             printResourceLimit(RLIMIT_STACK,  "RLIMIT_STACK");
             printResourceLimit(RLIMIT_AS,     "RLIMIT_AS");
+#endif
+#if MONGO_HAVE_HEADER_UNISTD_H
+  #ifdef _SC_OPEN_MAX
+            printSysconf(_SC_OPEN_MAX,         "_SC_OPEN_MAX");
+  #endif
+  #ifdef _SC_PAGESIZE
+            printSysconf(_SC_PAGESIZE,         "_SC_PAGESIZE");
+  #endif
+  #ifdef _SC_PHYS_PAGES
+            printSysconf(_SC_PHYS_PAGES,       "_SC_PHYS_PAGES");
+  #endif
+  #ifdef _SC_AVPHYS_PAGES
+            printSysconf(_SC_AVPHYS_PAGES,     "_SC_AVPHYS_PAGES");
+  #endif
+  #ifdef _SC_NPROCESSORS_CONF
+            printSysconf(_SC_NPROCESSORS_CONF, "_SC_NPROCESSORS_CONF");
+  #endif
+  #ifdef _SC_NPROCESSORS_ONLN
+            printSysconf(_SC_NPROCESSORS_ONLN, "_SC_NPROCESSORS_ONLN");
+  #endif
 #endif
             rawOut(" ");
         }

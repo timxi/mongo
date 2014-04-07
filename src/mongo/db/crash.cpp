@@ -20,6 +20,9 @@
 
 #include <string.h>
 
+#if MONGO_HAVE_HEADER_SYS_RESOURCE_H
+  #include <sys/resource.h>
+#endif
 #if MONGO_HAVE_HEADER_SYS_VFS_H
   #include <sys/vfs.h>
   #ifndef MONGO_CRASH_HAVE_STATFS_IMPL
@@ -172,6 +175,45 @@ namespace mongo {
             rawOut(" ");
         }
 
+#if MONGO_HAVE_HEADER_SYS_RESOURCE_H
+        static void printResourceLimit(int resource, const char *rname) {
+            char buf[1<<12];
+            char *p;
+            int r;
+            struct rlimit rlim;
+            r = getrlimit(resource, &rlim);
+            if (r != 0) {
+                int eno = errno;
+                p = buf;
+                p = stpcpy(p, "Error getting ");
+                p = stpcpy(p, rname);
+                p = stpcpy(p, ": ");
+                p = stpcpy(p, strerror(eno));
+                rawOut(buf);
+                return;
+            }
+
+            p = buf;
+            p = stpcpy(p, rname);
+            p = stpcpy(p, ": ");
+            if (rlim.rlim_cur == RLIM_INFINITY) {
+                p = stpcpy(p, "unlimited (soft)");
+            } else {
+                int n;
+                snprintf(p, (sizeof buf) - (p - buf), "%zu (soft)%n", static_cast<size_t>(rlim.rlim_cur), &n);
+                p += n;
+            }
+            if (rlim.rlim_max == RLIM_INFINITY) {
+                p = stpcpy(p, ", unlimited (hard)");
+            } else {
+                int n;
+                snprintf(p, (sizeof buf) - (p - buf), ", %zu (hard)%n", static_cast<size_t>(rlim.rlim_max), &n);
+                p += n;
+            }
+            rawOut(buf);
+        }
+#endif
+
         static void processInfo() {
             rawOut("--------------------------------------------------------------------------------");
             rawOut("Process info:");
@@ -189,6 +231,15 @@ namespace mongo {
             rawOut(buf);
             snprintf(buf, sizeof buf, "PHYS: %llu MB", pi.getMemSizeMB());
             rawOut(buf);
+#if MONGO_HAVE_HEADER_SYS_RESOURCE_H
+            printResourceLimit(RLIMIT_CORE,   "RLIMIT_CORE");
+            printResourceLimit(RLIMIT_CPU,    "RLIMIT_CPU");
+            printResourceLimit(RLIMIT_DATA,   "RLIMIT_DATA");
+            printResourceLimit(RLIMIT_FSIZE,  "RLIMIT_FSIZE");
+            printResourceLimit(RLIMIT_NOFILE, "RLIMIT_NOFILE");
+            printResourceLimit(RLIMIT_STACK,  "RLIMIT_STACK");
+            printResourceLimit(RLIMIT_AS,     "RLIMIT_AS");
+#endif
             rawOut(" ");
         }
 

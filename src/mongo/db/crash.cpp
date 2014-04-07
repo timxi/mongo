@@ -218,85 +218,84 @@ namespace mongo {
 #if MONGO_CRASH_HAVE_STATFS_IMPL
 
 #if defined(FSTYPENAMES)
-        static const char *f_type2str(size_t type) {
-            return fstypenames[type];
+        static const char *f_typeString(const struct statfs &st) {
+            return fstypenames[st.f_type];
         }
 #else /* !defined(FSTYPENAMES) */
-        template<typename f_type_t>
-        static const char *f_type2str(const f_type_t &type) {
+        static const char *f_typeString(const struct statfs &st) {
             if (false) {  // so I can do "} else if (...) {" below
 #ifdef AUTOFS_SUPER_MAGIC
-            } else if (type == AUTOFS_SUPER_MAGIC) {
+            } else if (st.f_type == AUTOFS_SUPER_MAGIC) {
                 return "autofs";
 #endif
 #ifdef BTRFS_SUPER_MAGIC
-            } else if (type == BTRFS_SUPER_MAGIC) {
+            } else if (st.f_type == BTRFS_SUPER_MAGIC) {
                 return "btrfs";
 #endif
 #ifdef ECRYPTFS_SUPER_MAGIC
-            } else if (type == ECRYPTFS_SUPER_MAGIC) {
+            } else if (st.f_type == ECRYPTFS_SUPER_MAGIC) {
                 return "ecryptfs";
 #endif
 #ifdef EXT_SUPER_MAGIC
-            } else if (type == EXT_SUPER_MAGIC) {
+            } else if (st.f_type == EXT_SUPER_MAGIC) {
                 return "ext";
 #endif
 #ifdef EXT2_OLD_SUPER_MAGIC
-            } else if (type == EXT2_OLD_SUPER_MAGIC) {
+            } else if (st.f_type == EXT2_OLD_SUPER_MAGIC) {
                 return "ext2 (old magic)";
 #endif
 #ifdef EXT2_SUPER_MAGIC
-            } else if (type == EXT2_SUPER_MAGIC) {
+            } else if (st.f_type == EXT2_SUPER_MAGIC) {
                 // For some reason, EXT2_SUPER_MAGIC, EXT3_SUPER_MAGIC, and EXT4_SUPER_MAGIC are all the same.
                 // Probably need some ext-specific function to distinguish them...
                 return "ext2/3/4";
 #endif
 #ifdef EXT3_SUPER_MAGIC
-            } else if (type == EXT3_SUPER_MAGIC) {
+            } else if (st.f_type == EXT3_SUPER_MAGIC) {
                 return "ext2/3/4";
 #endif
 #ifdef EXT4_SUPER_MAGIC
-            } else if (type == EXT4_SUPER_MAGIC) {
+            } else if (st.f_type == EXT4_SUPER_MAGIC) {
                 return "ext2/3/4";
 #endif
 #ifdef HFS_SUPER_MAGIC
-            } else if (type == HFS_SUPER_MAGIC) {
+            } else if (st.f_type == HFS_SUPER_MAGIC) {
                 return "hfs";
 #endif
 #ifdef JFS_SUPER_MAGIC
-            } else if (type == JFS_SUPER_MAGIC) {
+            } else if (st.f_type == JFS_SUPER_MAGIC) {
                 return "jfs";
 #endif
 #ifdef NFS_SUPER_MAGIC
-            } else if (type == NFS_SUPER_MAGIC) {
+            } else if (st.f_type == NFS_SUPER_MAGIC) {
                 return "nfs";
 #endif
 #ifdef NILFS_SUPER_MAGIC
-            } else if (type == NILFS_SUPER_MAGIC) {
+            } else if (st.f_type == NILFS_SUPER_MAGIC) {
                 return "nilfs";
 #endif
 #ifdef RAMFS_MAGIC
-            } else if (type == RAMFS_MAGIC) {
+            } else if (st.f_type == RAMFS_MAGIC) {
                 return "ramfs";
 #endif
 #ifdef REISERFS_SUPER_MAGIC
-            } else if (type == REISERFS_SUPER_MAGIC) {
+            } else if (st.f_type == REISERFS_SUPER_MAGIC) {
                 return "reiserfs";
 #endif
 #ifdef SQUASHFS_MAGIC
-            } else if (type == SQUASHFS_MAGIC) {
+            } else if (st.f_type == SQUASHFS_MAGIC) {
                 return "squashfs";
 #endif
 #ifdef TMPFS_MAGIC
-            } else if (type == TMPFS_MAGIC) {
+            } else if (st.f_type == TMPFS_MAGIC) {
                 return "tmpfs";
 #endif
 #ifdef UFS_MAGIC
-            } else if (type == UFS_MAGIC) {
+            } else if (st.f_type == UFS_MAGIC) {
                 return "ufs";
 #endif
 #ifdef XFS_SUPER_MAGIC
-            } else if (type == XFS_SUPER_MAGIC) {
+            } else if (st.f_type == XFS_SUPER_MAGIC) {
                 return "xfs";
 #endif
             } else {
@@ -330,7 +329,7 @@ namespace mongo {
 #endif
             p = buf;
             p = stpcpy(p, "type: ");
-            p = stpcpy(p, f_type2str(st.f_type));
+            p = stpcpy(p, f_typeString(st));
             rawOut(buf);
 #if MONGO_HAVE_HEADER_XFS_XFS_H
             }  // ugh

@@ -20,6 +20,39 @@
 
 #include <string.h>
 
+#if MONGO_HAVE_HEADER_SYS_VFS_H
+  #include <sys/vfs.h>
+  #ifndef MONGO_CRASH_HAVE_STATFS_IMPL
+    #define MONGO_CRASH_HAVE_STATFS_IMPL 1
+  #endif
+#endif
+#if MONGO_HAVE_HEADER_SYS_STATFS_H
+  #include <sys/statfs.h>
+  #ifndef MONGO_CRASH_HAVE_STATFS_IMPL
+    #define MONGO_CRASH_HAVE_STATFS_IMPL 1
+  #endif
+#endif
+#if MONGO_HAVE_HEADER_SYS_PARAM_H && MONGO_HAVE_HEADER_SYS_MOUNT_H
+  #include <sys/mount.h>
+  #include <sys/param.h>
+  #ifndef MONGO_CRASH_HAVE_STATFS_IMPL
+    #define MONGO_CRASH_HAVE_STATFS_IMPL 1
+  #endif
+  #if MONGO_HAVE_HEADER_SYS_DISKLABEL_H
+    #include <sys/disklabel.h>
+  #endif
+#endif
+#if MONGO_HAVE_HEADER_LINUX_MAGIC_H
+  #include <linux/magic.h>
+#endif
+#if MONGO_HAVE_HEADER_XFS_XFS_H
+  #include <xfs/xfs.h>
+#endif
+
+#ifndef MONGO_CRASH_HAVE_STATFS_IMPL
+  #define MONGO_CRASH_HAVE_STATFS_IMPL 0
+#endif
+
 #include <db.h>
 
 #include "mongo/base/init.h"
@@ -31,6 +64,7 @@
 #include "mongo/db/storage/env.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
+#include "mongo/util/paths.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/stacktrace.h"
 #include "mongo/util/version.h"
@@ -170,6 +204,209 @@ namespace mongo {
             rawOut(" ");
         }
 
+#if MONGO_HAVE_HEADER_XFS_XFS_H
+        static void xfsInfo(const char *path) {
+            // TODO, xfsctl seems to need a real file to work with, maybe better done in the ft layer
+        }
+#endif
+
+        __attribute__((unused))
+        static void extInfo(const char *path) {
+            // TODO
+        }
+
+#if MONGO_CRASH_HAVE_STATFS_IMPL
+
+#if defined(FSTYPENAMES)
+        static const char *f_type2str(size_t type) {
+            return fstypenames[type];
+        }
+#else /* !defined(FSTYPENAMES) */
+        template<typename f_type_t>
+        static const char *f_type2str(const f_type_t &type) {
+            if (false) {  // so I can do "} else if (...) {" below
+#ifdef AUTOFS_SUPER_MAGIC
+            } else if (type == AUTOFS_SUPER_MAGIC) {
+                return "autofs";
+#endif
+#ifdef BTRFS_SUPER_MAGIC
+            } else if (type == BTRFS_SUPER_MAGIC) {
+                return "btrfs";
+#endif
+#ifdef ECRYPTFS_SUPER_MAGIC
+            } else if (type == ECRYPTFS_SUPER_MAGIC) {
+                return "ecryptfs";
+#endif
+#ifdef EXT_SUPER_MAGIC
+            } else if (type == EXT_SUPER_MAGIC) {
+                return "ext";
+#endif
+#ifdef EXT2_OLD_SUPER_MAGIC
+            } else if (type == EXT2_OLD_SUPER_MAGIC) {
+                return "ext2 (old magic)";
+#endif
+#ifdef EXT2_SUPER_MAGIC
+            } else if (type == EXT2_SUPER_MAGIC) {
+                // For some reason, EXT2_SUPER_MAGIC, EXT3_SUPER_MAGIC, and EXT4_SUPER_MAGIC are all the same.
+                // Probably need some ext-specific function to distinguish them...
+                return "ext2/3/4";
+#endif
+#ifdef EXT3_SUPER_MAGIC
+            } else if (type == EXT3_SUPER_MAGIC) {
+                return "ext2/3/4";
+#endif
+#ifdef EXT4_SUPER_MAGIC
+            } else if (type == EXT4_SUPER_MAGIC) {
+                return "ext2/3/4";
+#endif
+#ifdef HFS_SUPER_MAGIC
+            } else if (type == HFS_SUPER_MAGIC) {
+                return "hfs";
+#endif
+#ifdef JFS_SUPER_MAGIC
+            } else if (type == JFS_SUPER_MAGIC) {
+                return "jfs";
+#endif
+#ifdef NFS_SUPER_MAGIC
+            } else if (type == NFS_SUPER_MAGIC) {
+                return "nfs";
+#endif
+#ifdef NILFS_SUPER_MAGIC
+            } else if (type == NILFS_SUPER_MAGIC) {
+                return "nilfs";
+#endif
+#ifdef RAMFS_MAGIC
+            } else if (type == RAMFS_MAGIC) {
+                return "ramfs";
+#endif
+#ifdef REISERFS_SUPER_MAGIC
+            } else if (type == REISERFS_SUPER_MAGIC) {
+                return "reiserfs";
+#endif
+#ifdef SQUASHFS_MAGIC
+            } else if (type == SQUASHFS_MAGIC) {
+                return "squashfs";
+#endif
+#ifdef TMPFS_MAGIC
+            } else if (type == TMPFS_MAGIC) {
+                return "tmpfs";
+#endif
+#ifdef UFS_MAGIC
+            } else if (type == UFS_MAGIC) {
+                return "ufs";
+#endif
+#ifdef XFS_SUPER_MAGIC
+            } else if (type == XFS_SUPER_MAGIC) {
+                return "xfs";
+#endif
+            } else {
+                return "unknown";
+            }
+        }
+#endif /* defined(FSTYPENAMES) */
+
+#endif /* MONGO_CRASH_HAVE_STATFS_IMPL */
+
+        static void singleFsInfo(const char *path) {
+#if MONGO_CRASH_HAVE_STATFS_IMPL
+            char buf[1<<12];
+            char *p;
+            struct statfs st;
+            int r = statfs(path, &st);
+            if (r != 0) {
+                p = buf;
+                p = stpcpy(p, "Error looking up filesystem information: ");
+                p = stpcpy(p, strerror(errno));
+                rawOut(buf);
+                return;
+            }
+            snprintf(buf, sizeof buf, "type magic: 0x%08lX", static_cast<long unsigned>(st.f_type));
+            rawOut(buf);
+#if MONGO_HAVE_HEADER_XFS_XFS_H
+            if (platform_test_xfs_path(path)) {
+                rawOut("type: xfs");
+            } else {
+#endif
+            p = buf;
+            p = stpcpy(p, "type: ");
+            p = stpcpy(p, f_type2str(st.f_type));
+            rawOut(buf);
+#if MONGO_HAVE_HEADER_XFS_XFS_H
+            }  // ugh
+#endif
+            snprintf(buf, sizeof buf, "bsize: %zu", static_cast<size_t>(st.f_bsize));
+            rawOut(buf);
+            snprintf(buf, sizeof buf, "blocks: %zu", static_cast<size_t>(st.f_blocks));
+            rawOut(buf);
+            snprintf(buf, sizeof buf, "bfree: %zu", static_cast<size_t>(st.f_bfree));
+            rawOut(buf);
+            snprintf(buf, sizeof buf, "bavail: %zu", static_cast<size_t>(st.f_bavail));
+            rawOut(buf);
+
+#if MONGO_HAVE_HEADER_XFS_XFS_H
+            if (platform_test_xfs_path(path)) {
+                xfsInfo(path);
+            }
+#endif /* MONGO_HAVE_HEADER_XFS_XFS_H */
+
+#else /* !MONGO_CRASH_HAVE_STATFS_IMPL */
+            rawOut("statfs(2) unavailable");
+#endif
+
+            
+        }
+
+        static void fsInfo() {
+            rawOut("--------------------------------------------------------------------------------");
+            rawOut("Filesystem information:");
+            rawOut(" ");
+
+            char buf[1<<12];
+            char *p;
+
+            char dbpath_cstr[1<<12];
+            if (cmdLine.doFork || dbpath[0] == '/') {
+                strncpy(dbpath_cstr, dbpath.c_str(), sizeof dbpath_cstr);
+            } else {
+                // mallocs, hopefully this is ok
+                std::stringstream ss;
+                ss << cmdLine.cwd << "/" << dbpath;
+                std::string absdbpath = ss.str();
+                strncpy(dbpath_cstr, absdbpath.c_str(), sizeof dbpath_cstr);
+            }
+
+            p = buf;
+            p = stpcpy(p, "Information for dbpath \"");
+            p = stpncpy(p, dbpath_cstr, (sizeof buf) - (p - buf));
+            p = stpncpy(p, "\":", (sizeof buf) - (p - buf));
+            rawOut(buf);
+            rawOut(" ");
+            singleFsInfo(dbpath_cstr);
+            rawOut(" ");
+
+            if (!cmdLine.logDir.empty() && cmdLine.logDir != dbpath) {
+                p = buf;
+                p = stpcpy(p, "Information for logDir \"");
+                p = stpncpy(p, cmdLine.logDir.c_str(), (sizeof buf) - (p - buf));
+                p = stpncpy(p, "\":", (sizeof buf) - (p - buf));
+                rawOut(buf);
+                rawOut(" ");
+                singleFsInfo(cmdLine.logDir.c_str());
+                rawOut(" ");
+            }
+
+            if (!cmdLine.tmpDir.empty() && cmdLine.tmpDir != dbpath) {
+                p = buf;
+                p = stpcpy(p, "Information for tmpDir \"");
+                p = stpncpy(p, cmdLine.tmpDir.c_str(), (sizeof buf) - (p - buf));
+                p = stpncpy(p, "\":", (sizeof buf) - (p - buf));
+                rawOut(buf);
+                rawOut(" ");
+                singleFsInfo(cmdLine.tmpDir.c_str());
+                rawOut(" ");
+            }
+        }
+
         static void curOpInfo() {
             rawOut("--------------------------------------------------------------------------------");
             rawOut("Current operations in progress:");
@@ -213,6 +450,7 @@ namespace mongo {
         static void extraInfo() {
             processInfo();
             parsedOpts();
+            fsInfo();
             curOpInfo();
             opDebugInfo();
         }

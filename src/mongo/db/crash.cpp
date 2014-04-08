@@ -317,6 +317,13 @@ namespace mongo {
 #elif defined(_DARWIN_FEATURE_64_BIT_INODE)
             return st.f_fstypename;
 #else /* !defined(FSTYPENAMES) && !defined(_DARWIN_FEATURE_64_BIT_INODE) */
+
+#if MONGO_HAVE_HEADER_XFS_XFS_H
+            if (platform_test_xfs_path(path)) {
+                return "xfs";
+            }
+#endif
+
             if (false) {  // so I can do "} else if (...) {" below
 #ifdef AUTOFS_SUPER_MAGIC
             } else if (st.f_type == AUTOFS_SUPER_MAGIC) {
@@ -416,18 +423,10 @@ namespace mongo {
             }
             snprintf(buf, sizeof buf, "type magic: 0x%08lX", static_cast<long unsigned>(st.f_type));
             rawOut(buf);
-#if MONGO_HAVE_HEADER_XFS_XFS_H
-            if (platform_test_xfs_path(path)) {
-                rawOut("type: xfs");
-            } else {
-#endif
             p = buf;
             p = stpcpy(p, "type: ");
             p = stpcpy(p, f_typeString(st));
             rawOut(buf);
-#if MONGO_HAVE_HEADER_XFS_XFS_H
-            }  // ugh
-#endif
             snprintf(buf, sizeof buf, "bsize: %zu", static_cast<size_t>(st.f_bsize));
             rawOut(buf);
             snprintf(buf, sizeof buf, "blocks: %zu", static_cast<size_t>(st.f_blocks));

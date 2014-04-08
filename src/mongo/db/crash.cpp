@@ -319,89 +319,68 @@ namespace mongo {
 #else /* !defined(FSTYPENAMES) && !defined(_DARWIN_FEATURE_64_BIT_INODE) */
 
 #if MONGO_HAVE_HEADER_XFS_XFS_H
-            if (platform_test_xfs_path(path)) {
-                return "xfs";
-            }
+            if (platform_test_xfs_path(path)) { return "xfs"; }
 #endif
 
-            if (false) {  // so I can do "} else if (...) {" below
 #ifdef AUTOFS_SUPER_MAGIC
-            } else if (st.f_type == AUTOFS_SUPER_MAGIC) {
-                return "autofs";
+            if (st.f_type == AUTOFS_SUPER_MAGIC) { return "autofs"; }
 #endif
 #ifdef BTRFS_SUPER_MAGIC
-            } else if (st.f_type == BTRFS_SUPER_MAGIC) {
-                return "btrfs";
+            if (st.f_type == BTRFS_SUPER_MAGIC) { return "btrfs"; }
 #endif
 #ifdef ECRYPTFS_SUPER_MAGIC
-            } else if (st.f_type == ECRYPTFS_SUPER_MAGIC) {
-                return "ecryptfs";
+            if (st.f_type == ECRYPTFS_SUPER_MAGIC) { return "ecryptfs"; }
 #endif
 #ifdef EXT_SUPER_MAGIC
-            } else if (st.f_type == EXT_SUPER_MAGIC) {
-                return "ext";
+            if (st.f_type == EXT_SUPER_MAGIC) { return "ext"; }
 #endif
 #ifdef EXT2_OLD_SUPER_MAGIC
-            } else if (st.f_type == EXT2_OLD_SUPER_MAGIC) {
-                return "ext2 (old magic)";
+            if (st.f_type == EXT2_OLD_SUPER_MAGIC) { return "ext2 (old magic)"; }
 #endif
 #ifdef EXT2_SUPER_MAGIC
-            } else if (st.f_type == EXT2_SUPER_MAGIC) {
+            if (st.f_type == EXT2_SUPER_MAGIC) {
                 // For some reason, EXT2_SUPER_MAGIC, EXT3_SUPER_MAGIC, and EXT4_SUPER_MAGIC are all the same.
                 // Probably need some ext-specific function to distinguish them...
                 return "ext2/3/4";
+            }
 #endif
 #ifdef EXT3_SUPER_MAGIC
-            } else if (st.f_type == EXT3_SUPER_MAGIC) {
-                return "ext2/3/4";
+            if (st.f_type == EXT3_SUPER_MAGIC) { return "ext2/3/4"; }
 #endif
 #ifdef EXT4_SUPER_MAGIC
-            } else if (st.f_type == EXT4_SUPER_MAGIC) {
-                return "ext2/3/4";
+            if (st.f_type == EXT4_SUPER_MAGIC) { return "ext2/3/4"; }
 #endif
 #ifdef HFS_SUPER_MAGIC
-            } else if (st.f_type == HFS_SUPER_MAGIC) {
-                return "hfs";
+            if (st.f_type == HFS_SUPER_MAGIC) { return "hfs"; }
 #endif
 #ifdef JFS_SUPER_MAGIC
-            } else if (st.f_type == JFS_SUPER_MAGIC) {
-                return "jfs";
+            if (st.f_type == JFS_SUPER_MAGIC) { return "jfs"; }
 #endif
 #ifdef NFS_SUPER_MAGIC
-            } else if (st.f_type == NFS_SUPER_MAGIC) {
-                return "nfs";
+            if (st.f_type == NFS_SUPER_MAGIC) { return "nfs"; }
 #endif
 #ifdef NILFS_SUPER_MAGIC
-            } else if (st.f_type == NILFS_SUPER_MAGIC) {
-                return "nilfs";
+            if (st.f_type == NILFS_SUPER_MAGIC) { return "nilfs"; }
 #endif
 #ifdef RAMFS_MAGIC
-            } else if (st.f_type == RAMFS_MAGIC) {
-                return "ramfs";
+            if (st.f_type == RAMFS_MAGIC) { return "ramfs"; }
 #endif
 #ifdef REISERFS_SUPER_MAGIC
-            } else if (st.f_type == REISERFS_SUPER_MAGIC) {
-                return "reiserfs";
+            if (st.f_type == REISERFS_SUPER_MAGIC) { return "reiserfs"; }
 #endif
 #ifdef SQUASHFS_MAGIC
-            } else if (st.f_type == SQUASHFS_MAGIC) {
-                return "squashfs";
+            if (st.f_type == SQUASHFS_MAGIC) { return "squashfs"; }
 #endif
 #ifdef TMPFS_MAGIC
-            } else if (st.f_type == TMPFS_MAGIC) {
-                return "tmpfs";
+            if (st.f_type == TMPFS_MAGIC) { return "tmpfs"; }
 #endif
 #ifdef UFS_MAGIC
-            } else if (st.f_type == UFS_MAGIC) {
-                return "ufs";
+            if (st.f_type == UFS_MAGIC) { return "ufs"; }
 #endif
 #ifdef XFS_SUPER_MAGIC
-            } else if (st.f_type == XFS_SUPER_MAGIC) {
-                return "xfs";
+            if (st.f_type == XFS_SUPER_MAGIC) { return "xfs"; }
 #endif
-            } else {
-                return "unknown";
-            }
+            return "unknown";
 #endif /* !defined(FSTYPENAMES) && !defined(_DARWIN_FEATURE_64_BIT_INODE) */
         }
 
